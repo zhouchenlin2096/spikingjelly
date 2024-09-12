@@ -1,7 +1,20 @@
 # SpikingJelly
-![GitHub last commit](https://img.shields.io/github/last-commit/fangwei123456/spikingjelly) [![Documentation Status](https://readthedocs.org/projects/spikingjelly/badge/?version=latest)](https://spikingjelly.readthedocs.io/zh_CN/latest) [![PyPI](https://img.shields.io/pypi/v/spikingjelly)](https://pypi.org/project/spikingjelly) [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/spikingjelly)](https://pypi.org/project/spikingjelly) ![repo size](https://img.shields.io/github/repo-size/fangwei123456/spikingjelly)
+![GitHub last commit](https://img.shields.io/github/last-commit/fangwei123456/spikingjelly) 
+[![Documentation Status](https://readthedocs.org/projects/spikingjelly/badge/?version=latest)](https://spikingjelly.readthedocs.io/zh_CN/latest) 
+[![PyPI](https://img.shields.io/pypi/v/spikingjelly)](https://pypi.org/project/spikingjelly) 
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/spikingjelly)](https://pypi.org/project/spikingjelly) 
+![repo size](https://img.shields.io/github/repo-size/fangwei123456/spikingjelly)
+![GitHub issues](https://img.shields.io/github/issues/fangwei123456/spikingjelly)
+![GitHub closed issues](https://img.shields.io/github/issues-closed-raw/fangwei123456/spikingjelly)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/fangwei123456/spikingjelly)
+![GitHub closed pull requests](https://img.shields.io/github/issues-pr-closed/fangwei123456/spikingjelly)
+![Visitors](https://api.visitorbadge.io/api/visitors?path=fangwei123456%2Fspikingjelly%20&countColor=%23263759&style=flat)
+![GitHub forks](https://img.shields.io/github/forks/fangwei123456/spikingjelly)
+![GitHub Repo stars](https://img.shields.io/github/stars/fangwei123456/spikingjelly)
+![GitHub contributors](https://img.shields.io/github/contributors/fangwei123456/spikingjelly)
 
-English | [中文](./README_cn.md)
+
+English | [中文(Chinese)](./README_cn.md)
 
 ![demo](./docs/source/_static/logo/demo.png)
 
@@ -26,13 +39,13 @@ Note that SpikingJelly is based on PyTorch. Please make sure that you have insta
 
 **Version notes**
 
-The odd version number is the developing version, which is updated with GitHub/OpenI repository. The even version number is the stable version and available at PyPI. 
+The odd version number is the developing version, updated with the GitHub/OpenI repository. The even version number is the stable version and is available at PyPI. 
 
-The default doc is for the latest developing version. If you are using the  stable version, do not forget to switch to the doc in the corresponding version.
+The default doc is for the latest developing version. If you are using the stable version, do not forget to switch to the doc in the corresponding version.
 
 From the version `0.0.0.0.14`, modules including `clock_driven` and `event_driven` are renamed. Please refer to the tutorial [Migrate From Old Versions](https://spikingjelly.readthedocs.io/zh_CN/0.0.0.0.14/activation_based_en/migrate_from_legacy.html).
 
-If you use an old version of SpikingJelly, you may meet some fatal bugs. Refer to [Bugs History with Releases](./bugs.md) for more details.
+If you use an old version of SpikingJelly, you may encounter some fatal bugs. Refer to [Bugs History with Releases](./bugs.md) for more details.
 
 **Docs for different versions:**
 
@@ -51,7 +64,7 @@ If you use an old version of SpikingJelly, you may meet some fatal bugs. Refer t
 pip install spikingjelly
 ```
 
-**Install the latest developing version from the source codes**:
+**Install the latest developing version from the source code**:
 
 From [GitHub](https://github.com/fangwei123456/spikingjelly):
 ```bash
@@ -77,7 +90,7 @@ nn.Sequential(
         )
 ```
 
-This simple network with a Poisson encoder can achieve 92% accuracy on MNIST test dataset. Read refer to the tutorial for more details. You can also run this code in Python terminal for training on classifying MNIST:
+This simple network with a Poisson encoder can achieve 92% accuracy on the MNIST test dataset. Read refer to the tutorial for more details. You can also run this code in a Python terminal for training on classifying MNIST:
 
 ```python
 python -m spikingjelly.activation_based.examples.lif_fc_mnist -tau 2.0 -T 100 -device cuda:0 -b 64 -epochs 100 -data-dir <PATH to MNIST> -amp -opt adam -lr 1e-3 -j 8
@@ -116,7 +129,7 @@ class ANN(nn.Module):
         return x
 ```
 
-This simple network with analog encoding can achieve 98.44% accuracy after converiosn on MNIST test dataset. Read the tutorial for more details. You can also run this code in Python terminal for training on classifying MNIST using converted model:
+This simple network with analog encoding can achieve 98.44% accuracy after conversion on MNIST test dataset. Read the tutorial for more details. You can also run this code in a Python terminal for training on classifying MNIST using the converted model:
 
 ```python
 >>> import spikingjelly.activation_based.ann2snn.examples.cnn_mnist as cnn_mnist
@@ -125,9 +138,9 @@ This simple network with analog encoding can achieve 98.44% accuracy after conve
 
 ## CUDA-Enhanced Neuron
 
-SpikingJelly provides two backends for multi-step neurons. You can use the user-friendly `torch` backend for easily codding and debugging, and use `cupy` backend for faster training speed.
+SpikingJelly provides two backends for multi-step neurons. You can use the user-friendly `torch` backend for easily coding and debugging and use `cupy` backend for faster training speed.
 
-The followed figure compares execution time of two backends of Multi-Step LIF neurons (`float32`):
+The following figure compares the execution time of two backends of Multi-Step LIF neurons (`float32`):
 
 <img src="./docs/source/_static/tutorials/activation_based/11_cext_neuron_with_lbl/exe_time_fb.png" alt="exe_time_fb"  />
 
@@ -161,17 +174,22 @@ SpikingJelly includes the following neuromorphic datasets:
 | N-MNIST        | [Converting Static Image Datasets to Spiking Neuromorphic Datasets Using Saccades](https://www.frontiersin.org/articles/10.3389/fnins.2015.00437/full) |
 | Nav Gesture    | [Event-Based Gesture Recognition With Dynamic Background Suppression Using Smartphone Computational Capabilities](https://www.frontiersin.org/articles/10.3389/fnins.2020.00275/full) |
 | Spiking Heidelberg Digits (SHD) | [The Heidelberg Spiking Data Sets for the Systematic Evaluation of Spiking Neural Networks](https://doi.org/10.1109/TNNLS.2020.3044364) |
+| DVS-Lip | [Multi-Grained Spatio-Temporal Features Perceived Network for Event-Based Lip-Reading](https://openaccess.thecvf.com/content/CVPR2022/html/Tan_Multi-Grained_Spatio-Temporal_Features_Perceived_Network_for_Event-Based_Lip-Reading_CVPR_2022_paper.html) |
 
-Users can use both the origin events data and frames data integrated by SpikingJelly:
+Users can use both the origin event data and frame data integrated by SpikingJelly:
 
 ```python
 import torch
 from torch.utils.data import DataLoader
 from spikingjelly.datasets import pad_sequence_collate, padded_sequence_mask
 from spikingjelly.datasets.dvs128_gesture import DVS128Gesture
+
+# Set the root directory for the dataset
 root_dir = 'D:/datasets/DVS128Gesture'
+# Load event dataset
 event_set = DVS128Gesture(root_dir, train=True, data_type='event')
 event, label = event_set[0]
+# Print the keys and their corresponding values in the event data
 for k in event.keys():
     print(k, event[k])
 
@@ -181,7 +199,9 @@ for k in event.keys():
 # p [1 0 0 ... 1 0 0]
 # label 0
 
+# Load a dataset with fixed frame numbers
 fixed_frames_number_set = DVS128Gesture(root_dir, train=True, data_type='frame', frames_number=20, split_by='number')
+# Randomly select two frames and print their shapes
 rand_index = torch.randint(low=0, high=fixed_frames_number_set.__len__(), size=[2])
 for i in rand_index:
     frame, label = fixed_frames_number_set[i]
@@ -190,6 +210,7 @@ for i in rand_index:
 # frame[308].shape=[T, C, H, W]=(20, 2, 128, 128)
 # frame[453].shape=[T, C, H, W]=(20, 2, 128, 128)
 
+# Load a dataset with a fixed duration and print the shapes of the first 5 samples
 fixed_duration_frame_set = DVS128Gesture(root_dir, data_type='frame', duration=1000000, train=True)
 for i in range(5):
     x, y = fixed_duration_frame_set[i]
@@ -201,6 +222,7 @@ for i in range(5):
 # x[3].shape=[T, C, H, W]=(5, 2, 128, 128)
 # x[4].shape=[T, C, H, W]=(7, 2, 128, 128)
 
+# Create a data loader for the fixed duration frame dataset and print the shapes and sequence lengths
 train_data_loader = DataLoader(fixed_duration_frame_set, collate_fn=pad_sequence_collate, batch_size=5)
 for x, y, x_len in train_data_loader:
     print(f'x.shape=[N, T, C, H, W]={tuple(x.shape)}')
@@ -220,15 +242,15 @@ for x, y, x_len in train_data_loader:
 ```
 More datasets will be included in the future.
 
-If some datasets' download link are not available for some users, the users can download from the OpenI mirror:
+If some datasets' download links are not available for some users, the users can download from the OpenI mirror:
 
 https://openi.pcl.ac.cn/OpenI/spikingjelly/datasets?type=0
 
-All datasets saved in the OpenI mirror are allowable by their licence or authors' agreement.
+All datasets saved in the OpenI mirror are allowable by their license or author's agreement.
 
 ## Tutorials
 
-SpikingJelly provides elaborate tutorials. Here are some of tutorials:
+SpikingJelly provides elaborate tutorials. Here are some tutorials:
 
 | Figure                                                       | Tutorial                                                     |
 | ------------------------------------------------------------ | ------------------------------------------------------------ |
@@ -241,6 +263,7 @@ SpikingJelly provides elaborate tutorials. Here are some of tutorials:
 | ![classify_dvsg](./docs/source/_static/tutorials/activation_based/classify_dvsg/network.png) | [Classify DVS Gesture](https://spikingjelly.readthedocs.io/zh_CN/0.0.0.0.14/activation_based_en/classify_dvsg.html) |
 | ![recurrent_connection_and_stateful_synapse](./docs/source/_static/tutorials/activation_based/recurrent_connection_and_stateful_synapse/ppt/nets.png) | [Recurrent Connection and Stateful Synapse](https://spikingjelly.readthedocs.io/zh_CN/0.0.0.0.14/activation_based_en/recurrent_connection_and_stateful_synapse.html) |
 | ![stdp_learning](./docs/source/_static/tutorials/activation_based/stdp/mstdp.png) | [STDP Learning](https://spikingjelly.readthedocs.io/zh_CN/0.0.0.0.14/activation_based_en/stdp.html) |
+| ![reinforcement_learning](./docs/source/_static/tutorials/activation_based/snn_for_rl/snn_for_rl.png) | [Reinforcement Learning](https://spikingjelly.readthedocs.io/zh-cn/latest/activation_based/ilc_san.html) |
 
 Other tutorials that are not listed here are also available at the document https://spikingjelly.readthedocs.io.
 
@@ -251,28 +274,41 @@ Publications using SpikingJelly are recorded in [Publications](./publications.md
 If you use SpikingJelly in your work, please cite it as follows:
 
 ```
-@misc{SpikingJelly,
-	title = {SpikingJelly},
-	author = {Fang, Wei and Chen, Yanqi and Ding, Jianhao and Chen, Ding and Yu, Zhaofei and Zhou, Huihui and Timothée Masquelier and Tian, Yonghong and other contributors},
-	year = {2020},
-	howpublished = {\url{https://github.com/fangwei123456/spikingjelly}},
-	note = {Accessed: YYYY-MM-DD},
-}
+@article{
+doi:10.1126/sciadv.adi1480,
+author = {Wei Fang  and Yanqi Chen  and Jianhao Ding  and Zhaofei Yu  and Timothée Masquelier  and Ding Chen  and Liwei Huang  and Huihui Zhou  and Guoqi Li  and Yonghong Tian },
+title = {SpikingJelly: An open-source machine learning infrastructure platform for spike-based intelligence},
+journal = {Science Advances},
+volume = {9},
+number = {40},
+pages = {eadi1480},
+year = {2023},
+doi = {10.1126/sciadv.adi1480},
+URL = {https://www.science.org/doi/abs/10.1126/sciadv.adi1480},
+eprint = {https://www.science.org/doi/pdf/10.1126/sciadv.adi1480},
+abstract = {Spiking neural networks (SNNs) aim to realize brain-inspired intelligence on neuromorphic chips with high energy efficiency by introducing neural dynamics and spike properties. As the emerging spiking deep learning paradigm attracts increasing interest, traditional programming frameworks cannot meet the demands of automatic differentiation, parallel computation acceleration, and high integration of processing neuromorphic datasets and deployment. In this work, we present the SpikingJelly framework to address the aforementioned dilemma. We contribute a full-stack toolkit for preprocessing neuromorphic datasets, building deep SNNs, optimizing their parameters, and deploying SNNs on neuromorphic chips. Compared to existing methods, the training of deep SNNs can be accelerated 11×, and the superior extensibility and flexibility of SpikingJelly enable users to accelerate custom models at low costs through multilevel inheritance and semiautomatic code generation. SpikingJelly paves the way for synthesizing truly energy-efficient SNN-based machine intelligence systems, which will enrich the ecology of neuromorphic computing. Motivation and introduction of the software framework SpikingJelly for spiking deep learning.}}
 ```
-
-Note: To specify the version of framework you are using, the default value `YYYY-MM-DD` in the `note` field should be replaced with the date of the last change of the framework you are using, i.e. the date of the latest commit.
 
 ## Contribution
 
-You can read the issues and get the problems to be solved and latest development plans. We welcome all users to join the discussion of development plans, solve issues, and send pull requests.
+You can read the issues and get the problems to be solved and the latest development plans. We welcome all users to join the discussion of development plans, solve issues, and send pull requests.
 
-Not all API documents are written in both English and Chinese. We welcome users to complete translation (from English to Chinese, or from Chinese to English).
+Not all API documents are written in both English and Chinese. We welcome users to complete translation (from English to Chinese or from Chinese to English).
 
 ## About
 
 [Multimedia Learning Group, Institute of Digital Media (NELVT), Peking University](https://pkuml.org/) and [Peng Cheng Laboratory](http://www.szpclab.com/) are the main developers of SpikingJelly.
 
-<img src="./docs/source/_static/logo/pku.png" alt="PKU" width="160" /><img src="./docs/source/_static/logo/pcl.png" alt="PCL" width="160" />
+<img src="./docs/source/_static/logo/pku.png" alt="PKU" width="160" />
+
+<img src="./docs/source/_static/logo/pcl.png" alt="PCL" width="160" />
 
 The list of developers can be found [here](https://github.com/fangwei123456/spikingjelly/graphs/contributors).
 
+## All Thanks to Our Contributors
+
+<a href="https://github.com/fangwei123456/spikingjelly/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=fangwei123456/spikingjelly" />
+</a>
+
+<p align="right"><a href="#top"><img src="https://cdn-icons-png.flaticon.com/512/892/892692.png" height="50px"></a></p>

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Callable
+from typing import Callable, Union
 
 from . import neuron, base
 
@@ -106,7 +106,7 @@ def set_step_mode(net: nn.Module, step_mode: str):
                 m.step_mode = step_mode
 
 
-def set_backend(net: nn.Module, backend: str, instance: object or tuple = (nn.Module, )):
+def set_backend(net: nn.Module, backend: str, instance: Union[nn.Module, tuple[nn.Module, ...]] = (nn.Module, )):
     """
     * :ref:`API in English <set_backend-en>`
 
@@ -117,7 +117,7 @@ def set_backend(net: nn.Module, backend: str, instance: object or tuple = (nn.Mo
     :param backend: 使用哪个后端
     :type backend: str
     :param instance: 类型为 ``instance`` 的模块后端会被改变
-    :type instance: nn.Module or tuple[nn.Module]
+    :type instance: Union[nn.Module, tuple[nn.Module, ...]]
     :return: None
 
     将 ``net`` 中 所有类型为 ``instance`` 的模块后端更改为 ``backend``
@@ -131,7 +131,7 @@ def set_backend(net: nn.Module, backend: str, instance: object or tuple = (nn.Mo
     :param backend: the backend to be set
     :type backend: str
     :param instance: the backend of which instance will be changed
-    :type instance: nn.Module or tuple[nn.Module]
+    :type instance: Union[nn.Module, tuple[nn.Module, ...]]
     :return: None
 
     Sets backends of all modules whose instance is ``instance`` in ``net`` to ``backend``
@@ -522,7 +522,7 @@ def first_spike_index(spikes: Tensor):
         return spikes.cumsum(dim=-1).cumsum(dim=-1) == 1
 
 
-def multi_step_forward(x_seq: Tensor, single_step_module: nn.Module or list[nn.Module] or tuple[nn.Module] or nn.Sequential or Callable):
+def multi_step_forward(x_seq: Tensor, single_step_module: Union[nn.Module, list[nn.Module], tuple[nn.Module], nn.Sequential, Callable]):
     """
     * :ref:`API in English <multi_step_forward-en>`
 
@@ -531,7 +531,7 @@ def multi_step_forward(x_seq: Tensor, single_step_module: nn.Module or list[nn.M
     :param x_seq: ``shape=[T, batch_size, ...]`` 的输入tensor
     :type x_seq: Tensor
     :param single_step_module: 一个或多个单步模块
-    :type single_step_module: torch.nn.Module or list[nn.Module] or tuple[nn.Module] or torch.nn.Sequential or Callable
+    :type single_step_module: Union[nn.Module, list[nn.Module], tuple[nn.Module], nn.Sequential, Callable]
     :return: ``shape=[T, batch_size, ...]`` 的输出tensor
     :rtype: torch.Tensor
 
@@ -544,7 +544,7 @@ def multi_step_forward(x_seq: Tensor, single_step_module: nn.Module or list[nn.M
     :param x_seq: the input tensor with ``shape=[T, batch_size, ...]``
     :type x_seq: torch.Tensor
     :param single_step_module: one or many single-step modules
-    :type single_step_module: torch.nn.Module or list[nn.Module] or tuple[nn.Module] or torch.nn.Sequential or Callable
+    :type single_step_module: Union[nn.Module, list[nn.Module], tuple[nn.Module], nn.Sequential, Callable]
     :return: the output tensor with ``shape=[T, batch_size, ...]``
     :rtype: torch.torch.Tensor
 
@@ -563,6 +563,50 @@ def multi_step_forward(x_seq: Tensor, single_step_module: nn.Module or list[nn.M
             y_seq.append(single_step_module(x_seq[t]))
 
     return torch.stack(y_seq)
+
+
+def t_last_multi_step_forward(x_seq: Tensor, single_step_module: Union[nn.Module, list[nn.Module], tuple[nn.Module], nn.Sequential, Callable]):
+    """
+    * :ref:`API in English <t_last_multi_step_forward-en>`
+
+    .. _t_last_multi_step_forward-cn:
+
+    :param x_seq: ``shape=[batch_size, ..., T]`` 的输入tensor
+    :type x_seq: Tensor
+    :param single_step_module: 一个或多个单步模块
+    :type single_step_module: Union[nn.Module, list[nn.Module], tuple[nn.Module], nn.Sequential, Callable]
+    :return: ``shape=[batch_size, ..., T]`` 的输出tensor
+    :rtype: torch.Tensor
+
+    在单步模块 ``single_step_module`` 上使用多步前向传播。
+
+    * :ref:`中文 API <t_last_multi_step_forward-cn>`
+
+    .. _t_last_multi_step_forward-en:
+
+    :param x_seq: the input tensor with ``shape=[batch_size, ..., T]``
+    :type x_seq: torch.Tensor
+    :param single_step_module: one or many single-step modules
+    :type single_step_module: Union[nn.Module, list[nn.Module], tuple[nn.Module], nn.Sequential, Callable]
+    :return: the output tensor with ``shape=[batch_size, ..., T]``
+    :rtype: torch.torch.Tensor
+
+    Applies multi-step forward on ``single_step_module``.
+
+    """
+    y_seq = []
+    if isinstance(single_step_module, (list, tuple, nn.Sequential)):
+        for t in range(x_seq.shape[-1]):
+            x_seq_t = x_seq[..., t]
+            for m in single_step_module:
+                x_seq_t = m(x_seq_t)
+            y_seq.append(x_seq_t)
+    else:
+        for t in range(x_seq.shape[-1]):
+            y_seq.append(single_step_module(x_seq[..., t]))
+
+    return torch.stack(y_seq, dim=-1)
+
 
 def chunk_multi_step_forward(split_size: int, x_seq: Tensor, multi_step_module: nn.Module):
     """
@@ -650,7 +694,7 @@ def chunk_multi_step_forward(split_size: int, x_seq: Tensor, multi_step_module: 
         y_seq.append(multi_step_module(x))
     return torch.cat(y_seq, 0)
 
-def seq_to_ann_forward(x_seq: Tensor, stateless_module: nn.Module or list or tuple or nn.Sequential or Callable):
+def seq_to_ann_forward(x_seq: Tensor, stateless_module: Union[nn.Module, list, tuple, nn.Sequential, Callable]):
     """
     * :ref:`API in English <seq_to_ann_forward-en>`
 
@@ -659,9 +703,11 @@ def seq_to_ann_forward(x_seq: Tensor, stateless_module: nn.Module or list or tup
     :param x_seq: ``shape=[T, batch_size, ...]`` 的输入tensor
     :type x_seq: Tensor
     :param stateless_module: 单个或多个无状态网络层
-    :type stateless_module: torch.nn.Module or list or tuple or torch.nn.Sequential or Callable
+    :type stateless_module: Union[nn.Module, list, tuple, nn.Sequential, Callable]
     :return: the output tensor with ``shape=[T, batch_size, ...]``
     :rtype: Tensor
+
+    使用无状态层进行多步前向传播。
 
     * :ref:`中文 API <seq_to_ann_forward-cn>`
 
@@ -670,11 +716,11 @@ def seq_to_ann_forward(x_seq: Tensor, stateless_module: nn.Module or list or tup
     :param x_seq: the input tensor with ``shape=[T, batch_size, ...]``
     :type x_seq: Tensor
     :param stateless_module: one or many stateless modules
-    :type stateless_module: torch.nn.Module or list or tuple or torch.nn.Sequential or Callable
+    :type stateless_module: Union[nn.Module, list, tuple, nn.Sequential, Callable]
     :return: the output tensor with ``shape=[T, batch_size, ...]``
     :rtype: Tensor
 
-    Applied forward on stateless modules
+    Applied forward on stateless modules.
 
     """
     y_shape = [x_seq.shape[0], x_seq.shape[1]]
@@ -686,6 +732,61 @@ def seq_to_ann_forward(x_seq: Tensor, stateless_module: nn.Module or list or tup
         y = stateless_module(y)
     y_shape.extend(y.shape[1:])
     return y.view(y_shape)
+
+
+def t_last_seq_to_ann_forward(x_seq: Tensor, stateless_module: Union[nn.Module, list, tuple, nn.Sequential, Callable]):
+    """
+    * :ref:`API in English <t_last_seq_to_ann_forward-en>`
+
+    .. _t_last_seq_to_ann_forward-cn:
+
+    :param x_seq: ``shape=[batch_size, ..., T]`` 的输入tensor
+    :type x_seq: Tensor
+    :param stateless_module: 单个或多个无状态网络层
+    :type stateless_module: Union[nn.Module, list, tuple, nn.Sequential, Callable]
+    :return: the output tensor with ``shape=[batch_size, ..., T]``
+    :rtype: Tensor
+
+    使用无状态层进行多步前向传播。
+
+    .. note::
+        SpikingJelly中默认序列数据的 ``shape=[T, batch_size, ...]``，但此函数是用于另一种格式，即 ``shape=[batch_size, ..., T]``。当使用 ``torch >= 2.0.0`` 时也有并行加速的效果。
+
+    .. note::
+        不能用于BN层，因为BN层的running mean/var是输入依赖的。对于BN层，只需要输入被当作是 ``shape = [N, C, ..]`` 即可并行计算，需要用户手动实现。
+
+
+    * :ref:`中文 API <t_last_seq_to_ann_forward-cn>`
+
+    .. _t_last_seq_to_ann_forward-en:
+
+    :param x_seq: the input tensor with ``shape=[batch_size, ..., T]``
+    :type x_seq: Tensor
+    :param stateless_module: one or many stateless modules
+    :type stateless_module: Union[nn.Module, list, tuple, nn.Sequential, Callable]
+    :return: the output tensor with ``shape=[batch_size, ..., T]``
+    :rtype: Tensor
+
+    Applied forward on stateless modules.
+
+    .. admonition:: Note
+        :class: note
+
+        The default shape of sequence data in SpikingJelly is ``shape=[T, batch_size, ...]``. However, this function is used for the other data format where  ``shape=[batch_size, ..., T]``. When using ``torch >= 2.0.0``, this function is computing in parallel.
+
+    .. admonition:: Note
+        :class: note
+
+        This function can not be applied to wrap BN because its running mean/var depends on inputs. The BN can be computed in parallel as long as the input is regarded as ``shape = [N, C, ..]``, which can be implemented by user manually.
+    """
+
+    if hasattr(torch, 'vmap'):
+        vmap_f = torch.vmap(stateless_module, in_dims=-1, out_dims=-1)
+        return vmap_f(x_seq)
+    else:
+        return t_last_multi_step_forward(x_seq, stateless_module)
+            
+
 
 
 def fused_conv2d_weight_of_convbn2d(conv2d: nn.Conv2d, bn2d: nn.BatchNorm2d):
@@ -1277,4 +1378,84 @@ def fptt_online_training(model: nn.Module, optimizer: torch.optim.Optimizer, x_s
 
 
 
+def ottt_online_training(model: nn.Module, optimizer: torch.optim.Optimizer, x_seq: torch.Tensor, target_seq: torch.Tensor, f_loss_t: Callable, online: bool) -> None:
+    """
+    :param model: the neural network
+    :type model: nn.Module
+    :param optimizer: the optimizer for the network
+    :type optimizer: torch.optim.Optimizer
+    :param x_seq: the input sequence
+    :type x_seq: torch.Tensor
+    :param target_seq: the output sequence
+    :type target_seq: torch.Tensor
+    :param f_loss_t: the loss function, which should has the formulation of ``def f_loss_t(x_t, y_t) -> torch.Tensor``
+    :type f_loss_t: Callable
+    :param online: whether online update parameters or accumulate gradients through time steps
+    :type online: bool
+
+
+    The OTTT online training method is proposed by `Online Training Through Time for Spiking Neural Networks <https://openreview.net/forum?id=Siv3nHYHheI>`_. 
+    This function can also be used for SLTT training method proposed by `Towards Memory- and Time-Efficient Backpropagation for Training Spiking Neural Networks <https://openaccess.thecvf.com/content/ICCV2023/html/Meng_Towards_Memory-_and_Time-Efficient_Backpropagation_for_Training_Spiking_Neural_Networks_ICCV_2023_paper.html>`_ .
+
+    Example:
+
+    .. code-block:: python
+
+        from spikingjelly.activation_based import neuron, layer, functional
+
+        net = layer.OTTTSequential(
+            nn.Linear(8, 4),
+            neuron.OTTTLIFNode(),
+            nn.Linear(4, 2),
+            neuron.LIFNode()
+        )
+
+        optimizer = torch.optim.SGD(net.parameters(), lr=0.1)
+
+        T = 4
+        N = 2
+        online = True
+        for epoch in range(2):
+
+            x_seq = torch.rand([N, T, 8])
+            target_seq = torch.rand([N, T, 2])
+
+            functional.ottt_online_training(model=net, optimizer=optimizer, x_seq=x_seq, target_seq=target_seq, f_loss_t=F.mse_loss, online=online)
+            functional.reset_net(net)
+
+    """
+
+    # input x_seq/target_seq: [B, T, ...]
+    # transpose to [T, B, ...]
+    x_seq = x_seq.transpose(0, 1)
+    target_seq = target_seq.transpose(0, 1)
+    T = x_seq.shape[0]
+
+    batch_loss = 0.
+    y_all = []
+    if not online:
+        optimizer.zero_grad()
+    for t in range(T):
+        if online:
+            optimizer.zero_grad()
+
+        y_t = model(x_seq[t])
+        loss = f_loss_t(y_t, target_seq[t].contiguous())
+
+        loss.backward()
+
+        # update params
+        if online:
+            optimizer.step()
+
+        batch_loss += loss.data
+        y_all.append(y_t.detach())
+
+    if not online:
+        optimizer.step()
+
+    # y_all: [B, T, ...]
+    y_all = torch.stack(y_all, dim=1)
+
+    return batch_loss, y_all
 

@@ -1,5 +1,5 @@
 from torchvision.datasets import DatasetFolder
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, Union
 from abc import abstractmethod
 import scipy.io
 import struct
@@ -42,10 +42,83 @@ except BaseException as e:
     cupy = None
     pass
 
-def play_frame(x: torch.Tensor or np.ndarray, save_gif_to: str = None) -> None:
+
+def save_every_frame_of_an_entire_DVS_dataset(dataset: str, dataset_path: str, time_steps: int, save_pic_to: str = './', number_of_threads: int = 4):
+    '''
+    :param dataset: Name of the dataset to be saved. The current options available are: DVS128Gesture, CIFAR10DVS and NCaltech101.
+    :type dataset: str
+    :param dataset_path: Same storage path as loading dataset.
+    :type dataset_path: str
+    :param time_steps: Same T as loading the dataset.
+    :type time_steps: int
+    :param save_pic_to: Where to store each frame's image.
+    :type save_pic_to: str
+    :param number_of_threads: How many threads are used to save images.
+    :type number_of_threads: int
+    
+    demo:
+    save_every_frame_of_an_entire_DVS_dataset(dataset='DVS128Gesture', dataset_path="../../datasets/DVS128Gesture",
+                                              time_steps=16, save_pic_to='./demo', number_of_threads=20)
+    save_every_frame_of_an_entire_DVS_dataset(dataset='CIFAR10DVS', dataset_path="../../datasets/cifar10dvs",
+                                              time_steps=10, save_pic_to='./demo', number_of_threads=20)
+    save_every_frame_of_an_entire_DVS_dataset(dataset='NCaltech101', dataset_path="../../datasets/NCaltech101",
+                                              time_steps=14, save_pic_to='./demo', number_of_threads=20)
+    '''
+    if not dataset or not dataset_path or time_steps is None or not save_pic_to:
+        raise ValueError("All parameters(dataset, dataset_path, time_steps and save_pic_to) must be provided and cannot be empty.")
+    if dataset == 'DVS128Gesture':
+        from spikingjelly.datasets.dvs128_gesture import DVS128Gesture
+        data = DVS128Gesture(root=dataset_path, train=False, data_type='frame', split_by='number', frames_number=time_steps)
+    elif dataset == 'CIFAR10DVS':
+        from spikingjelly.datasets.cifar10_dvs import CIFAR10DVS
+        data = CIFAR10DVS(root=dataset_path, data_type='frame', split_by='number', frames_number=time_steps)
+    elif dataset == 'NCaltech101':
+        from spikingjelly.datasets.n_caltech101 import NCaltech101
+        data = NCaltech101(root=dataset_path, data_type='frame', split_by='number', frames_number=time_steps)
+    else:
+        raise ValueError("The dataset attribute can only be DVS128Gesture, CIFAR10DVS or NCaltech101")
+    import multiprocessing
+    multiprocessing.freeze_support()
+    pool = multiprocessing.Pool(processes=number_of_threads)
+    for i in range(len(data)):
+        frame, _ = data[i]
+        pool.apply_async(save_as_pic, args=(frame, save_pic_to, str(i)))
+    pool.close()
+    pool.join()
+    print('complete!!!')
+
+
+def save_as_pic(x: Union[torch.Tensor, np.ndarray], save_pic_to: str = './', pic_first_name: str = 'pic') -> None:
     '''
     :param x: frames with ``shape=[T, 2, H, W]``
-    :type x: torch.Tensor or np.ndarray
+    :type x: Union[torch.Tensor, np.ndarray]
+    :param save_pic_to: Where to store images.
+    :type save_pic_to: str
+    :param pic_first_name: Prefix for image names before _t (stored image names are: ``pic_first_name``_t.png)
+    :type pic_first_name: str
+    :return: None
+    
+    demo:
+    save_as_pic(frame, './demo', 'first_pic')
+    '''
+    if isinstance(x, np.ndarray):
+        x = torch.from_numpy(x)
+    if not save_pic_to.endswith('/'):       # Prevent users from forgetting to join the end '/'
+        save_pic_to += '/'
+    to_img = transforms.ToPILImage()
+    img_tensor = torch.zeros([x.shape[0], 3, x.shape[2], x.shape[3]])
+    img_tensor[:, 1] = x[:, 0]
+    img_tensor[:, 2] = x[:, 1]
+    for t in range(img_tensor.shape[0]):
+        plt.imshow(to_img(img_tensor[t]))
+        plt.axis('off')
+        plt.savefig(save_pic_to + pic_first_name + '_' + str(t) + '.png', bbox_inches='tight', pad_inches=0)
+
+
+def play_frame(x: Union[torch.Tensor, np.ndarray], save_gif_to: str = None) -> None:
+    '''
+    :param x: frames with ``shape=[T, 2, H, W]``
+    :type x: Union[torch.Tensor, np.ndarray]
     :param save_gif_to: If ``None``, this function will play the frames. If ``True``, this function will not play the frames
         but save frames to a gif file in the directory ``save_gif_to``
     :type save_gif_to: str
@@ -190,9 +263,9 @@ def integrate_events_segment_to_frame(x: np.ndarray, y: np.ndarray, p: np.ndarra
 
     .. math::
 
-        F(p, x, y) = \sum_{i = j_{l}}^{j_{r} - 1} \mathcal{I}_{p, x, y}(p_{i}, x_{i}, y_{i})
+        F(p, x, y) = \\sum_{i = j_{l}}^{j_{r} - 1} \\mathcal{I}_{p, x, y}(p_{i}, x_{i}, y_{i})
 
-    where :math:`\\lfloor \\cdot \\rfloor` is the floor operation, :math:`\mathcal{I}_{p, x, y}(p_{i}, x_{i}, y_{i})` is an indicator function and it equals 1 only when :math:`(p, x, y) = (p_{i}, x_{i}, y_{i})`.
+    where :math:`\\lfloor \\cdot \\rfloor` is the floor operation, :math:`\\mathcal{I}_{p, x, y}(p_{i}, x_{i}, y_{i})` is an indicator function and it equals 1 only when :math:`(p, x, y) = (p_{i}, x_{i}, y_{i})`.
     '''
     # 累计脉冲需要用bitcount而不能直接相加，原因可参考下面的示例代码，以及
     # https://stackoverflow.com/questions/15973827/handling-of-duplicate-indices-in-numpy-assignments
@@ -369,23 +442,20 @@ def integrate_events_by_fixed_duration(events: Dict, duration: int, H: int, W: i
     p = events['p']
     N = t.size
 
-    frames = []
+    frames_num = int(math.ceil(t[-1] / duration))
+    frames = np.zeros([frames_num, W])
+    frame_index = t // duration
     left = 0
-    right = 0
-    while True:
-        t_l = t[left]
-        while True:
-            if right == N or t[right] - t_l > duration:
-                break
-            else:
-                right += 1
-        # integrate from index [left, right)
-        frames.append(np.expand_dims(integrate_events_segment_to_frame(x, y, p, H, W, left, right), 0))
 
+    for i in range(frames_num - 1):
+        right = np.searchsorted(frame_index, i + 1, side='left')
+        frames[i] = integrate_events_segment_to_frame(x, y, p, H, W, left, right)
         left = right
 
-        if right == N:
-            return np.concatenate(frames)
+    frames[-1] = integrate_events_segment_to_frame(x, y, p, H, W, left, N)
+    return frames
+
+
 
 def integrate_events_file_to_frames_file_by_fixed_duration(loader: Callable, events_np_file: str, output_dir: str, duration: int, H: int, W: int, print_save: bool = False) -> None:
     '''
@@ -605,7 +675,7 @@ class NeuromorphicDatasetFolder(DatasetFolder):
         :type custom_integrate_function: Callable
         :param custom_integrated_frames_dir_name: The name of directory for saving frames integrating by ``custom_integrate_function``.
             If ``custom_integrated_frames_dir_name`` is ``None``, it will be set to ``custom_integrate_function.__name__``
-        :type custom_integrated_frames_dir_name: str or None
+        :type custom_integrated_frames_dir_name: Optional[str]
         :param transform: a function/transform that takes in
             a sample and returns a transformed version.
             E.g, ``transforms.RandomCrop`` for images.
@@ -736,6 +806,7 @@ class NeuromorphicDatasetFolder(DatasetFolder):
                     # use multi-thread to accelerate
                     t_ckp = time.time()
                     with ThreadPoolExecutor(max_workers=configure.max_threads_number_for_datasets_preprocess) as tpe:
+                        sub_threads = []
                         print(f'Start ThreadPoolExecutor with max workers = [{tpe._max_workers}].')
                         for e_root, e_dirs, e_files in os.walk(events_np_root):
                             if e_files.__len__() > 0:
@@ -743,7 +814,14 @@ class NeuromorphicDatasetFolder(DatasetFolder):
                                 for e_file in e_files:
                                     events_np_file = os.path.join(e_root, e_file)
                                     print(f'Start to integrate [{events_np_file}] to frames and save to [{output_dir}].')
-                                    tpe.submit(integrate_events_file_to_frames_file_by_fixed_frames_number, self.load_events_np, events_np_file, output_dir, split_by, frames_number, H, W, True)
+                                    sub_threads.append(tpe.submit(integrate_events_file_to_frames_file_by_fixed_frames_number, self.load_events_np, events_np_file, output_dir, split_by, frames_number, H, W, True))
+                        for sub_thread in sub_threads:
+                            if sub_thread.exception():
+                                print(sub_thread.exception())
+                                exit(-1)
+
+
+
 
                     print(f'Used time = [{round(time.time() - t_ckp, 2)}s].')
 
@@ -767,13 +845,18 @@ class NeuromorphicDatasetFolder(DatasetFolder):
                     t_ckp = time.time()
                     with ThreadPoolExecutor(max_workers=configure.max_threads_number_for_datasets_preprocess) as tpe:
                         print(f'Start ThreadPoolExecutor with max workers = [{tpe._max_workers}].')
+                        sub_threads = []
                         for e_root, e_dirs, e_files in os.walk(events_np_root):
                             if e_files.__len__() > 0:
                                 output_dir = os.path.join(frames_np_root, os.path.relpath(e_root, events_np_root))
                                 for e_file in e_files:
                                     events_np_file = os.path.join(e_root, e_file)
                                     print(f'Start to integrate [{events_np_file}] to frames and save to [{output_dir}].')
-                                    tpe.submit(integrate_events_file_to_frames_file_by_fixed_duration, self.load_events_np, events_np_file, output_dir, duration, H, W, True)
+                                    sub_threads.append(tpe.submit(integrate_events_file_to_frames_file_by_fixed_duration, self.load_events_np, events_np_file, output_dir, duration, H, W, True))
+                        for sub_thread in sub_threads:
+                            if sub_thread.exception():
+                                print(sub_thread.exception())
+                                exit(-1)
 
                     print(f'Used time = [{round(time.time() - t_ckp, 2)}s].')
 
@@ -798,6 +881,7 @@ class NeuromorphicDatasetFolder(DatasetFolder):
                     t_ckp = time.time()
                     with ThreadPoolExecutor(max_workers=configure.max_threads_number_for_datasets_preprocess) as tpe:
                         print(f'Start ThreadPoolExecutor with max workers = [{tpe._max_workers}].')
+                        sub_threads = []
                         for e_root, e_dirs, e_files in os.walk(events_np_root):
                             if e_files.__len__() > 0:
                                 output_dir = os.path.join(frames_np_root, os.path.relpath(e_root, events_np_root))
@@ -805,8 +889,12 @@ class NeuromorphicDatasetFolder(DatasetFolder):
                                     events_np_file = os.path.join(e_root, e_file)
                                     print(
                                         f'Start to integrate [{events_np_file}] to frames and save to [{output_dir}].')
-                                    tpe.submit(save_frames_to_npz_and_print, os.path.join(output_dir, os.path.basename(events_np_file)), custom_integrate_function(np.load(events_np_file), H, W))
+                                    sub_threads.append(tpe.submit(save_frames_to_npz_and_print, os.path.join(output_dir, os.path.basename(events_np_file)), custom_integrate_function(np.load(events_np_file), H, W)))
 
+                        for sub_thread in sub_threads:
+                            if sub_thread.exception():
+                                print(sub_thread.exception())
+                                exit(-1)
                     print(f'Used time = [{round(time.time() - t_ckp, 2)}s].')
 
                 _root = frames_np_root
@@ -826,7 +914,7 @@ class NeuromorphicDatasetFolder(DatasetFolder):
         else:
             _root = self.set_root_when_train_is_none(_root)
 
-        super().__init__(root=_root, loader=_loader, extensions=('.npz', ), transform=_transform,
+        super().__init__(root=_root, loader=_loader, extensions=('.npz', '.npy'), transform=_transform,
                          target_transform=_target_transform)
 
     def set_root_when_train_is_none(self, _root: str):
@@ -899,16 +987,16 @@ class NeuromorphicDatasetFolder(DatasetFolder):
 
 
 
-def random_temporal_delete(x_seq: torch.Tensor or np.ndarray, T_remain: int, batch_first):
+def random_temporal_delete(x_seq: Union[torch.Tensor, np.ndarray], T_remain: int, batch_first):
     """
     :param x_seq: a sequence with `shape = [T, N, *]`, where `T` is the sequence length and `N` is the batch size
-    :type x_seq: torch.Tensor or np.ndarray
+    :type x_seq: Union[torch.Tensor, np.ndarray]
     :param T_remain: the remained length
     :type T_remain: int
     :param batch_first: if `True`, `x_seq` will be regarded as `shape = [N, T, *]`
     :type batch_first: bool
     :return: the sequence with length `T_remain`, which is obtained by randomly removing `T - T_remain` slices
-    :rtype: torch.Tensor or np.ndarray
+    :rtype: Union[torch.Tensor, np.ndarray]
     The random temporal delete data augmentation used in `Deep Residual Learning in Spiking Neural Networks <https://arxiv.org/abs/2102.04159>`_.
     Codes example:
 
@@ -962,11 +1050,11 @@ class RandomTemporalDelete(torch.nn.Module):
         self.T_remain = T_remain
         self.batch_first = batch_first
 
-    def forward(self, x_seq: torch.Tensor or np.ndarray):
+    def forward(self, x_seq: Union[torch.Tensor, np.ndarray]):
         return random_temporal_delete(x_seq, self.T_remain, self.batch_first)
 
 
-def create_sub_dataset(source_dir: str, target_dir:str, ratio: float, use_soft_link=True, randomly=False):
+def create_sub_dataset(source_dir: str, target_dir: str, ratio: float, use_soft_link=True, randomly=False):
     """
     :param source_dir: the directory path of the origin dataset
     :type source_dir: str

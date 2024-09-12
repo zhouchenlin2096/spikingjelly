@@ -659,6 +659,63 @@ class SoftSign(SurrogateFunctionBase):
     # plt.grid(linestyle='--')
     # plt.show()
 
+@torch.jit.script
+def super_spike_backward(grad_output: torch.Tensor, x: torch.Tensor, alpha: float):
+    return alpha * grad_output / torch.pow(torch.abs(x) + 1., 2), None
+
+class super_spike(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        if x.requires_grad:
+            ctx.save_for_backward(x)
+            ctx.alpha = alpha
+        return heaviside(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return super_spike_backward(grad_output, ctx.saved_tensors[0], ctx.alpha)
+
+
+class SuperSpike(SurrogateFunctionBase):
+    def __init__(self, alpha=1.0, spiking=True):
+        '''
+        * :ref:`API in English <SuperSpike.__init__-en>`
+        .. _SuperSpike.__init__-cn:
+    
+        `SuperSpike: Supervised learning in multi-layer spiking neural networks <https://arxiv.org/abs/1705.11146>`_ 提出的反向传播时使用SuperSpike的梯度的脉冲发放函数。反向传播为
+
+        .. math::
+            g'(x) = \\frac{\\alpha}{(1 + (|x|))^2}
+
+
+        * :ref:`中文API <SuperSpike.__init__-cn>`
+        .. _SuperSpike.__init__-en:
+
+        The SuperSpike surrogate spiking function proposed by `SuperSpike: Supervised learning in multi-layer spiking neural networks <https://arxiv.org/abs/1705.11146>`_. The gradient is defined by
+
+        .. math::
+            g'(x) = \\frac{\\alpha}{(1 + (|x|))^2}
+        '''
+        super().__init__(alpha, spiking)
+
+    @staticmethod
+    def spiking_function(x, alpha):
+        return atan.apply(x, alpha)
+
+    @staticmethod
+    @torch.jit.script
+    def primitive_function(x: torch.Tensor, alpha: float):
+        raise NotImplementedError
+
+    @staticmethod
+    def backward(grad_output, x, alpha):
+        return super_spike_backward(grad_output, x, alpha)[0]
+
+    def cuda_code(self, x: str, y: str, dtype='fp32'):
+        raise NotImplementedError
+    def cuda_codes(self, y: str, x: str, dtype: str):
+        raise NotImplementedError
+
 
 @torch.jit.script
 def atan_backward(grad_output: torch.Tensor, x: torch.Tensor, alpha: float):
@@ -939,7 +996,7 @@ class Erf(SurrogateFunctionBase):
         反向传播时使用高斯误差函数(erf)的梯度的脉冲发放函数。反向传播为
 
         .. math::
-            g'(x) = \\frac{\\alpha}{\\sqrt{\pi}}e^{-\\alpha^2x^2}
+            g'(x) = \\frac{\\alpha}{\\sqrt{\\pi}}e^{-\\alpha^2x^2}
 
         对应的原函数为
 
@@ -949,7 +1006,7 @@ class Erf(SurrogateFunctionBase):
             \\begin{split}
             g(x) &= \\frac{1}{2}(1-\\text{erf}(-\\alpha x)) \\\\
             &= \\frac{1}{2} \\text{erfc}(-\\alpha x) \\\\
-            &= \\frac{1}{\\sqrt{\\pi}}\int_{-\\infty}^{\\alpha x}e^{-t^2}dt
+            &= \\frac{1}{\\sqrt{\\pi}}\\int_{-\\infty}^{\\alpha x}e^{-t^2}dt
             \\end{split}
 
         .. image:: ../_static/API/activation_based/surrogate/Erf.*
@@ -968,7 +1025,7 @@ class Erf(SurrogateFunctionBase):
         The Gaussian error (erf) surrogate spiking function. The gradient is defined by
 
         .. math::
-            g'(x) = \\frac{\\alpha}{\\sqrt{\pi}}e^{-\\alpha^2x^2}
+            g'(x) = \\frac{\\alpha}{\\sqrt{\\pi}}e^{-\\alpha^2x^2}
 
         The primitive function is defined by
 
@@ -978,7 +1035,7 @@ class Erf(SurrogateFunctionBase):
             \\begin{split}
             g(x) &= \\frac{1}{2}(1-\\text{erf}(-\\alpha x)) \\\\
             &= \\frac{1}{2} \\text{erfc}(-\\alpha x) \\\\
-            &= \\frac{1}{\\sqrt{\\pi}}\int_{-\\infty}^{\\alpha x}e^{-t^2}dt
+            &= \\frac{1}{\\sqrt{\\pi}}\\int_{-\\infty}^{\\alpha x}e^{-t^2}dt
             \\end{split}
 
         .. image:: ../_static/API/activation_based/surrogate/Erf.*
@@ -1028,7 +1085,7 @@ class Erf(SurrogateFunctionBase):
 def piecewise_leaky_relu_backward(grad_output: torch.Tensor, x: torch.Tensor, w: float, c: float):
     mask_width = (x.abs() < w)
     mask_c = mask_width.logical_not()
-    return grad_output * x.masked_fill(mask_width, 1 / w).masked_fill(mask_c, c), None, None
+    return grad_output * x.masked_fill(mask_width, 1 / (2*w)).masked_fill(mask_c, c), None, None
 
 
 class piecewise_leaky_relu(torch.autograd.Function):
@@ -1359,7 +1416,7 @@ class S2NN(MultiArgsSurrogateFunctionBase):
         .. math::
             g'(x) = \\begin{cases}
                 \\alpha * (1 - \\mathrm{sigmoid} (\\alpha x)) \\mathrm{sigmoid} (\\alpha x), x < 0 \\\\
-                \\\\frac{beta}{(x + 1)}, x \ge 0
+                \\\\frac{beta}{(x + 1)}, x \\ge 0
             \\end{cases}
 
         对应的原函数为
@@ -1367,7 +1424,7 @@ class S2NN(MultiArgsSurrogateFunctionBase):
         .. math::
             g(x) = \\begin{cases}
                 \\mathrm{sigmoid} (\\alpha x), x < 0 \\\\
-                \\beta \\mathrm{ln}(x + 1) + 1, x \ge 0
+                \\beta \\mathrm{ln}(x + 1) + 1, x \\ge 0
             \\end{cases}
 
         .. image:: ../_static/API/activation_based/surrogate/S2NN.*
@@ -1388,7 +1445,7 @@ class S2NN(MultiArgsSurrogateFunctionBase):
         .. math::
             g'(x) = \\begin{cases}
                 \\alpha * (1 - \\mathrm{sigmoid} (\\alpha x)) \\mathrm{sigmoid} (\\alpha x), x < 0 \\\\
-                \\beta (x + 1), x \ge 0
+                \\beta (x + 1), x \\ge 0
             \\end{cases}
 
         The primitive function is defined by
@@ -1396,7 +1453,7 @@ class S2NN(MultiArgsSurrogateFunctionBase):
         .. math::
             g(x) = \\begin{cases}
                 \\mathrm{sigmoid} (\\alpha x), x < 0 \\\\
-                \\beta \\mathrm{ln}(x + 1) + 1, x \ge 0
+                \\beta \\mathrm{ln}(x + 1) + 1, x \\ge 0
             \\end{cases}
 
         .. image:: ../_static/API/activation_based/surrogate/S2NN.*
@@ -2031,6 +2088,89 @@ class LogTailedReLU(SurrogateFunctionBase):
     # plt.grid(linestyle='--')
     # plt.savefig('LogTailedReLU.svg')
     # plt.savefig('LogTailedReLU.pdf')
+
+
+@torch.jit.script
+def deterministic_pass_backward(grad_output: torch.Tensor, x: torch.Tensor, alpha: float):
+    return grad_output, None
+
+
+class deterministic_pass(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        if x.requires_grad:
+            ctx.save_for_backward(x)
+            ctx.alpha = alpha
+        return heaviside(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return deterministic_pass_backward(grad_output, ctx.saved_tensors[0], ctx.alpha)
+
+
+class DeterministicPass(SurrogateFunctionBase):
+    def __init__(self, alpha=1.0, spiking=True):
+        super().__init__(alpha, spiking)
+
+    @staticmethod
+    def spiking_function(x, alpha):
+        return deterministic_pass.apply(x, alpha)
+
+    @staticmethod
+    @torch.jit.script
+    def primitive_function(x: torch.Tensor, alpha: float):
+        return x
+
+    @staticmethod
+    def backward(grad_output, x, alpha):
+        return deterministic_pass_backward(grad_output, x, alpha)[0]
+
+
+@torch.jit.script
+def rect_backward(grad_output: torch.Tensor, x: torch.Tensor, alpha: float):
+    return alpha * (x.abs() < 0.5 / alpha).to(x) * grad_output, None
+
+
+class rect(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        if x.requires_grad:
+            ctx.save_for_backward(x)
+            ctx.alpha = alpha
+        return heaviside(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return rect_backward(grad_output, ctx.saved_tensors[0], ctx.alpha)
+
+
+class Rect(SurrogateFunctionBase):
+    def __init__(self, alpha=1.0, spiking=True):
+        super().__init__(alpha, spiking)
+
+    @staticmethod
+    def spiking_function(x, alpha):
+        return rect.apply(x, alpha)
+
+    @staticmethod
+    @torch.jit.script
+    def primitive_function(x: torch.Tensor, alpha: float):
+        return torch.clamp(alpha * x + 0.5, min=0.0, max=1.0)
+
+    @staticmethod
+    def backward(grad_output, x, alpha):
+        return rect_backward(grad_output, x, alpha)[0]
+
+
+class poisson_pass(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        return torch.bernoulli(x).float()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_input = grad_output.clone()
+        return grad_input
 
 
 _has_cuda_ = [

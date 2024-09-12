@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Callable
+from typing import Callable, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +9,7 @@ import logging
 
 from . import surrogate, base
 from .auto_cuda import neuron_kernel as ac_neuron_kernel
-
+from .auto_cuda import ss_neuron_kernel as ss_ac_neuron_kernel
 try:
     import cupy
     from . import neuron_kernel, cuda_utils
@@ -21,8 +21,68 @@ except BaseException as e:
     cuda_utils = None
 
 
+class SimpleBaseNode(base.MemoryModule):
+    def __init__(self, v_threshold: float = 1., v_reset: Optional[float] = 0.,
+                 surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False,
+                 step_mode='s'):
+        """
+        A simple version of ``BaseNode``. The user can modify this neuron easily.
+        """
+        super().__init__()
+        self.v_threshold = v_threshold
+        self.v_reset = v_reset
+        self.surrogate_function = surrogate_function
+        self.detach_reset = detach_reset
+        self.step_mode = step_mode
+        self.register_memory(name='v', value=0.)
+
+    def single_step_forward(self, x: torch.Tensor):
+
+        self.neuronal_charge(x)
+        spike = self.neuronal_fire()
+        self.neuronal_reset(spike)
+        return spike
+
+    def neuronal_charge(self, x: torch.Tensor):
+        raise NotImplementedError
+
+    def neuronal_fire(self):
+        return self.surrogate_function(self.v - self.v_threshold)
+
+    def neuronal_reset(self, spike):
+        if self.detach_reset:
+            spike_d = spike.detach()
+        else:
+            spike_d = spike
+
+        if self.v_reset is None:
+            # soft reset
+            self.v = self.v - self.v_threshold * spike_d
+
+        else:
+            # hard reset
+            self.v = spike_d * self.v_reset + (1. - spike_d) * self.v
+
+class SimpleIFNode(SimpleBaseNode):
+    def neuronal_charge(self, x: torch.Tensor):
+        self.v = self.v + x
+
+class SimpleLIFNode(SimpleBaseNode):
+    def __init__(self, tau:float, decay_input: bool, v_threshold: float = 1., v_reset: float = 0.,
+                 surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False,
+                 step_mode='s'):
+        super().__init__(v_threshold, v_reset, surrogate_function, detach_reset, step_mode)
+        self.tau = tau
+        self.decay_input = decay_input
+
+    def neuronal_charge(self, x: torch.Tensor):
+        if self.decay_input:
+            self.v = self.v + (self.v_reset - self.v + x) / self.tau
+        else:
+            self.v = self.v + (self.v_reset - self.v) / self.tau + x
+
 class BaseNode(base.MemoryModule):
-    def __init__(self, v_threshold: float = 1., v_reset: float = 0.,
+    def __init__(self, v_threshold: float = 1., v_reset: Optional[float] = 0.,
                  surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False,
                  step_mode='s', backend='torch', store_v_seq: bool = False):
         """
@@ -35,7 +95,7 @@ class BaseNode(base.MemoryModule):
 
         :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
             如果设置为 ``None``，当神经元释放脉冲后，电压会被减去 ``v_threshold``
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
         :type surrogate_function: Callable
@@ -46,7 +106,7 @@ class BaseNode(base.MemoryModule):
         :param step_mode: 步进模式，可以为 `'s'` (单步) 或 `'m'` (多步)
         :type step_mode: str
 
-        :param backend: 使用那种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
             使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的
         :type backend: str
 
@@ -66,7 +126,7 @@ class BaseNode(base.MemoryModule):
 
         :param v_reset: reset voltage of this neurons layer. If not ``None``, the neuron's voltage will be set to ``v_reset``
             after firing a spike. If ``None``, the neuron's voltage will subtract ``v_threshold`` after firing a spike
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: the function for calculating surrogate gradients of the heaviside step function in backward
         :type surrogate_function: Callable
@@ -265,7 +325,7 @@ class BaseNode(base.MemoryModule):
 
 
 class AdaptBaseNode(BaseNode):
-    def __init__(self, v_threshold: float = 1., v_reset: float = 0.,
+    def __init__(self, v_threshold: float = 1., v_reset: Optional[float] = 0.,
                  v_rest: float = 0., w_rest: float = 0., tau_w: float = 2., a: float = 0., b: float = 0.,
                  surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode='s',
                  backend='torch', store_v_seq: bool = False):
@@ -371,7 +431,7 @@ class AdaptBaseNode(BaseNode):
 
 
 class IFNode(BaseNode):
-    def __init__(self, v_threshold: float = 1., v_reset: float = 0.,
+    def __init__(self, v_threshold: float = 1., v_reset: Optional[float] = 0.,
                  surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode='s',
                  backend='torch', store_v_seq: bool = False):
         """
@@ -384,7 +444,7 @@ class IFNode(BaseNode):
 
         :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
             如果设置为 ``None``，当神经元释放脉冲后，电压会被减去 ``v_threshold``
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
         :type surrogate_function: Callable
@@ -395,7 +455,7 @@ class IFNode(BaseNode):
         :param step_mode: 步进模式，可以为 `'s'` (单步) 或 `'m'` (多步)
         :type step_mode: str
 
-        :param backend: 使用那种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
             使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的
         :type backend: str
 
@@ -418,7 +478,7 @@ class IFNode(BaseNode):
 
         :param v_reset: reset voltage of this neurons layer. If not ``None``, the neuron's voltage will be set to ``v_reset``
             after firing a spike. If ``None``, the neuron's voltage will subtract ``v_threshold`` after firing a spike
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: the function for calculating surrogate gradients of the heaviside step function in backward
         :type surrogate_function: Callable
@@ -452,7 +512,7 @@ class IFNode(BaseNode):
     @property
     def supported_backends(self):
         if self.step_mode == 's':
-            return ('torch',)
+            return ('torch', 'cupy')
         elif self.step_mode == 'm':
             return ('torch', 'cupy')
         else:
@@ -593,7 +653,45 @@ class IFNode(BaseNode):
 
     def single_step_forward(self, x: torch.Tensor):
         if self.training:
-            return super().single_step_forward(x)
+            if self.backend == 'torch':
+                return super().single_step_forward(x)
+            elif self.backend == 'cupy':
+                hard_reset = self.v_reset is not None
+
+                if x.dtype == torch.float:
+                    dtype = 'float'
+                elif x.dtype == torch.half:
+                    dtype = 'half2'
+                else:
+                    raise NotImplementedError(x.dtype)
+                
+                if self.forward_kernel is None or not self.forward_kernel.check_attributes(hard_reset=hard_reset,
+                                                                                           dtype=dtype):
+                    self.forward_kernel = ss_ac_neuron_kernel.IFNodeFPKernel(hard_reset=hard_reset, dtype=dtype)
+
+                if self.backward_kernel is None or not self.backward_kernel.check_attributes(
+                        surrogate_function=self.surrogate_function.cuda_codes, hard_reset=hard_reset,
+                        detach_reset=self.detach_reset, dtype=dtype):
+                    self.backward_kernel = ss_ac_neuron_kernel.IFNodeBPKernel(
+                        surrogate_function=self.surrogate_function.cuda_codes, hard_reset=hard_reset,
+                        detach_reset=self.detach_reset, dtype=dtype)
+
+                self.v_float_to_tensor(x)
+
+                spike, v = ss_ac_neuron_kernel.IFNodeATGF.apply(x.flatten(0), self.v.flatten(0),
+                                                                     self.v_threshold, self.v_reset,
+                                                                     self.forward_kernel,
+                                                                     self.backward_kernel)
+
+                spike = spike.reshape(x.shape)
+                v = v.reshape(x.shape)
+
+                self.v = v
+
+                return spike
+            else:
+                raise ValueError(self.backend)
+
         else:
             self.v_float_to_tensor(x)
             if self.v_reset is None:
@@ -605,7 +703,7 @@ class IFNode(BaseNode):
 
 class LIFNode(BaseNode):
     def __init__(self, tau: float = 2., decay_input: bool = True, v_threshold: float = 1.,
-                 v_reset: float = 0., surrogate_function: Callable = surrogate.Sigmoid(),
+                 v_reset: Optional[float] = 0., surrogate_function: Callable = surrogate.Sigmoid(),
                  detach_reset: bool = False, step_mode='s', backend='torch', store_v_seq: bool = False):
         """
         * :ref:`API in English <LIFNode.__init__-en>`
@@ -623,7 +721,7 @@ class LIFNode(BaseNode):
 
         :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
             如果设置为 ``None``，当神经元释放脉冲后，电压会被减去 ``v_threshold``
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
         :type surrogate_function: Callable
@@ -634,7 +732,7 @@ class LIFNode(BaseNode):
         :param step_mode: 步进模式，可以为 `'s'` (单步) 或 `'m'` (多步)
         :type step_mode: str
 
-        :param backend: 使用那种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
             使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的
         :type backend: str
 
@@ -671,7 +769,7 @@ class LIFNode(BaseNode):
 
         :param v_reset: reset voltage of this neurons layer. If not ``None``, the neuron's voltage will be set to ``v_reset``
             after firing a spike. If ``None``, the neuron's voltage will subtract ``v_threshold`` after firing a spike
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: the function for calculating surrogate gradients of the heaviside step function in backward
         :type surrogate_function: Callable
@@ -717,7 +815,7 @@ class LIFNode(BaseNode):
     @property
     def supported_backends(self):
         if self.step_mode == 's':
-            return ('torch',)
+            return ('torch', 'cupy')
         elif self.step_mode == 'm':
             return ('torch', 'cupy')
         else:
@@ -907,7 +1005,48 @@ class LIFNode(BaseNode):
 
     def single_step_forward(self, x: torch.Tensor):
         if self.training:
-            return super().single_step_forward(x)
+            if self.backend == 'torch':
+                return super().single_step_forward(x)
+            elif self.backend == 'cupy':
+                hard_reset = self.v_reset is not None
+
+                if x.dtype == torch.float:
+                    dtype = 'float'
+                elif x.dtype == torch.half:
+                    dtype = 'half2'
+                else:
+                    raise NotImplementedError(x.dtype)
+                
+                if self.forward_kernel is None or not self.forward_kernel.check_attributes(hard_reset=hard_reset,
+                                                                                           dtype=dtype,
+                                                                                           decay_input=self.decay_input):
+                    self.forward_kernel = ss_ac_neuron_kernel.LIFNodeFPKernel(decay_input=self.decay_input,
+                                                                              hard_reset=hard_reset, dtype=dtype)
+
+                if self.backward_kernel is None or not self.backward_kernel.check_attributes(
+                        surrogate_function=self.surrogate_function.cuda_codes, hard_reset=hard_reset,
+                        detach_reset=self.detach_reset, dtype=dtype, decay_input=self.decay_input):
+                    self.backward_kernel = ss_ac_neuron_kernel.LIFNodeBPKernel(
+                        decay_input=self.decay_input,
+                        surrogate_function=self.surrogate_function.cuda_codes, hard_reset=hard_reset,
+                        detach_reset=self.detach_reset, dtype=dtype)
+
+                self.v_float_to_tensor(x)
+
+                spike, v = ss_ac_neuron_kernel.LIFNodeATGF.apply(x.flatten(0), self.v.flatten(0),
+                                                                 self.v_threshold, self.v_reset, 1. / self.tau,
+                                                                 self.forward_kernel,
+                                                                 self.backward_kernel)
+
+                spike = spike.reshape(x.shape)
+                v = v.reshape(x.shape)
+
+                self.v = v
+
+                return spike
+            else:
+                raise ValueError(self.backend)
+
         else:
             self.v_float_to_tensor(x)
             if self.v_reset is None:
@@ -1022,7 +1161,7 @@ class LIFNode(BaseNode):
 
 class ParametricLIFNode(BaseNode):
     def __init__(self, init_tau: float = 2.0, decay_input: bool = True, v_threshold: float = 1.,
-                 v_reset: float = 0., surrogate_function: Callable = surrogate.Sigmoid(),
+                 v_reset: Optional[float] = 0., surrogate_function: Callable = surrogate.Sigmoid(),
                  detach_reset: bool = False, step_mode='s', backend='torch', store_v_seq: bool = False):
         """
         * :ref:`API in English <ParametricLIFNode.__init__-en>`
@@ -1040,7 +1179,7 @@ class ParametricLIFNode(BaseNode):
 
         :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
             如果设置为 ``None``，当神经元释放脉冲后，电压会被减去 ``v_threshold``
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
         :type surrogate_function: Callable
@@ -1051,7 +1190,7 @@ class ParametricLIFNode(BaseNode):
         :param step_mode: 步进模式，可以为 `'s'` (单步) 或 `'m'` (多步)
         :type step_mode: str
 
-        :param backend: 使用那种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
             使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的
         :type backend: str
 
@@ -1094,7 +1233,7 @@ class ParametricLIFNode(BaseNode):
 
         :param v_reset: reset voltage of this neurons layer. If not ``None``, the neuron's voltage will be set to ``v_reset``
             after firing a spike. If ``None``, the neuron's voltage will subtract ``v_threshold`` after firing a spike
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: the function for calculating surrogate gradients of the heaviside step function in backward
         :type surrogate_function: Callable
@@ -1216,7 +1355,7 @@ class ParametricLIFNode(BaseNode):
 
 class QIFNode(BaseNode):
     def __init__(self, tau: float = 2., v_c: float = 0.8, a0: float = 1., v_threshold: float = 1., v_rest: float = 0.,
-                 v_reset: float = -0.1,
+                 v_reset: Optional[float] = -0.1,
                  surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode='s',
                  backend='torch', store_v_seq: bool = False):
         """
@@ -1241,7 +1380,7 @@ class QIFNode(BaseNode):
 
         :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
             如果设置为 ``None``，当神经元释放脉冲后，电压会被减去 ``v_threshold``
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
         :type surrogate_function: Callable
@@ -1252,7 +1391,7 @@ class QIFNode(BaseNode):
         :param step_mode: 步进模式，可以为 `'s'` (单步) 或 `'m'` (多步)
         :type step_mode: str
 
-        :param backend: 使用那种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
             使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的
         :type backend: str
 
@@ -1285,7 +1424,7 @@ class QIFNode(BaseNode):
 
         :param v_reset: reset voltage of this neurons layer. If not ``None``, the neuron's voltage will be set to ``v_reset``
             after firing a spike. If ``None``, the neuron's voltage will subtract ``v_threshold`` after firing a spike
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: the function for calculating surrogate gradients of the heaviside step function in backward
         :type surrogate_function: Callable
@@ -1366,7 +1505,7 @@ class QIFNode(BaseNode):
 
 class EIFNode(BaseNode):
     def __init__(self, tau: float = 2., delta_T: float = 1., theta_rh: float = .8, v_threshold: float = 1.,
-                 v_rest: float = 0., v_reset: float = -0.1,
+                 v_rest: float = 0., v_reset: Optional[float] = -0.1,
                  surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode='s',
                  backend='torch', store_v_seq: bool = False):
         """
@@ -1388,7 +1527,7 @@ class EIFNode(BaseNode):
 
         :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
             如果设置为 ``None``，当神经元释放脉冲后，电压会被减去 ``v_threshold``
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
         :type surrogate_function: Callable
@@ -1399,7 +1538,7 @@ class EIFNode(BaseNode):
         :param step_mode: 步进模式，可以为 `'s'` (单步) 或 `'m'` (多步)
         :type step_mode: str
 
-        :param backend: 使用那种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
             使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的
         :type backend: str
 
@@ -1432,7 +1571,7 @@ class EIFNode(BaseNode):
 
         :param v_reset: reset voltage of this neurons layer. If not ``None``, the neuron's voltage will be set to ``v_reset``
             after firing a spike. If ``None``, the neuron's voltage will subtract ``v_threshold`` after firing a spike
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: the function for calculating surrogate gradients of the heaviside step function in backward
         :type surrogate_function: Callable
@@ -1518,7 +1657,7 @@ class EIFNode(BaseNode):
 
 class IzhikevichNode(AdaptBaseNode):
     def __init__(self, tau: float = 2., v_c: float = 0.8, a0: float = 1., v_threshold: float = 1.,
-                 v_reset: float = 0., v_rest: float = -0.1, w_rest: float = 0., tau_w: float = 2., a: float = 0.,
+                 v_reset: Optional[float] = 0., v_rest: float = -0.1, w_rest: float = 0., tau_w: float = 2., a: float = 0.,
                  b: float = 0.,
                  surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode='s',
                  backend='torch', store_v_seq: bool = False):
@@ -1638,7 +1777,7 @@ class LIAFNode(LIFNode):
 
 class KLIFNode(BaseNode):
     def __init__(self, scale_reset: bool = False, tau: float = 2., decay_input: bool = True, v_threshold: float = 1.,
-                 v_reset: float = 0., surrogate_function: Callable = surrogate.Sigmoid(),
+                 v_reset: Optional[float] = 0., surrogate_function: Callable = surrogate.Sigmoid(),
                  detach_reset: bool = False, step_mode='s', backend='torch', store_v_seq: bool = False):
         """
         * :ref:`API in English <KLIFNode.__init__-en>`
@@ -1659,7 +1798,7 @@ class KLIFNode(BaseNode):
 
         :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
             如果设置为 ``None``，当神经元释放脉冲后，电压会被减去 ``v_threshold``
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
         :type surrogate_function: Callable
@@ -1670,7 +1809,7 @@ class KLIFNode(BaseNode):
         :param step_mode: 步进模式，可以为 `'s'` (单步) 或 `'m'` (多步)
         :type step_mode: str
 
-        :param backend: 使用那种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
             使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的
         :type backend: str
 
@@ -1735,7 +1874,7 @@ class KLIFNode(BaseNode):
 
         :param v_reset: reset voltage of this neurons layer. If not ``None``, the neuron's voltage will be set to ``v_reset``
             after firing a spike. If ``None``, the neuron's voltage will subtract ``v_threshold`` after firing a spike
-        :type v_reset: float
+        :type v_reset: Optional[float]
 
         :param surrogate_function: the function for calculating surrogate gradients of the heaviside step function in backward
         :type surrogate_function: Callable
@@ -1900,7 +2039,7 @@ class PSN(nn.Module, base.MultiStepModule):
         return spike_seq.view(x_seq.shape)
 
     def extra_repr(self):
-        return super().extra_repr() + f', T={self.T}'
+        return super().extra_repr() + f'T={self.T}, '
 
 
 class MaskedPSN(base.MemoryModule):
@@ -2139,3 +2278,1549 @@ class SlidingPSN(base.MemoryModule):
 
     def extra_repr(self):
         return super().extra_repr() + f', order={self.k}'
+
+class GatedLIFNode(base.MemoryModule):
+    def __init__(self, T: int, inplane = None,
+                 init_linear_decay = None, init_v_subreset = None, init_tau: float = 0.25, init_v_threshold: float = 0.5, init_conduct: float = 0.5,
+                 surrogate_function: Callable = surrogate.Sigmoid(), step_mode='m', backend='torch'):
+        """
+        * :ref:`中文API <GatedLIFNode.__init__-cn>`
+
+        .. _GatedLIFNode.__init__-cn:
+
+        :param T: 时间步长
+        :type T: int
+
+        :param inplane: 输入tensor的通道数。不设置inplane，则默认使用layer-wise GLIF
+        :type inplane: int
+
+        :param init_linear_decay: 膜电位线性衰减常数初始值，不设置就默认为init_v_threshold/(T * 2)
+        :type init_linear_decay: float
+
+        :param init_v_subreset: 膜电位复位电压初始值
+        :type init_v_subreset: float
+
+        :param init_tau: 膜电位时间常数的初始值
+        :type init_tau: float
+
+        :param init_v_threshold: 神经元的阈值电压初始值
+        :type init_v_threshold: float
+
+        :param init_conduct: 膜电位电导率初始值
+        :type init_conduct: float
+
+        :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
+        :type surrogate_function: Callable
+
+        :param step_mode: 步进模式，只支持 `'m'` (多步)
+        :type step_mode: str
+
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+            使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的。gated-LIF只支持torch
+        :type backend: str
+
+
+        模型出处：`GLIF: A Unified Gated Leaky Integrate-and-Fire Neuron for Spiking Neural Networks <https://openreview.net/forum?id=UmFSx2c4ubT>`
+        GLIF中所有的膜电位参数都是可学的，包括新引入的门控系数。
+
+        * :ref:`API in English <GatedLIFNode.__init__-en>`
+
+        .. _GatedLIFNode.__init__-en:
+
+        :param T: time-step
+        :type T: int
+
+        :param inplane: input tensor channel number, default: None(layer-wise GLIF). If set, otherwise(channel-wise GLIF)
+        :type inplane: int
+
+        :param init_linear_decay: initial linear-decay constant，default: init_v_threshold/(T * 2)
+        :type init_linear_decay: float
+
+        :param init_v_subreset: initial soft-reset constant
+        :type init_v_subreset: float
+
+        :param init_tau: initial exponential-decay constant
+        :type init_tau: float
+
+        :param init_v_threshold: initial menbrane potential threshold
+        :type init_v_threshold: float
+
+        :param init_conduct: initial conduct
+        :type init_conduct: float
+
+        :param surrogate_function: surrogate gradient
+        :type surrogate_function: Callable
+
+        :param step_mode: step mode, only support `'m'` (multi-step)
+        :type step_mode: str
+
+        :param backend: backend fot this neuron layer, which can be "gemm" or "conv". This option only works for the multi-step mode
+        :type backend: str
+
+
+        Gated LIF neuron refers to `GLIF: A Unified Gated Leaky Integrate-and-Fire Neuron for Spiking Neural Networks <https://openreview.net/forum?id=UmFSx2c4ubT>`
+        All membrane-related parameters are learnable, including the gates.
+        """
+
+        assert isinstance(init_tau, float) and init_tau < 1.
+        assert isinstance(T, int) and T is not None
+        assert isinstance(inplane, int) or inplane is None
+        assert (isinstance(init_linear_decay, float) and init_linear_decay < 1.) or init_linear_decay is None
+        assert (isinstance(init_v_subreset, float) and init_v_subreset < 1.) or init_v_subreset is None
+
+        assert step_mode == 'm'
+        super().__init__()
+        self.surrogate_function = surrogate_function
+        self.backend = backend
+        self.step_mode = step_mode
+        self.T = T
+        self.register_memory('v', 0.)
+        self.register_memory('u', 0.)
+        self.channel_wise = inplane is not None
+        if self.channel_wise: #channel-wise learnable params
+            self.alpha, self.beta, self.gamma = [nn.Parameter(torch.tensor(0.2 * (np.random.rand(inplane) - 0.5), dtype=torch.float)) for i in range(3)]
+            self.tau = nn.Parameter(- math.log(1 / init_tau - 1) * torch.ones(inplane, dtype=torch.float))
+            self.v_threshold = nn.Parameter(- math.log(1 / init_v_threshold - 1) * torch.ones(inplane, dtype=torch.float))
+            init_linear_decay = init_v_threshold / (T * 2) if init_linear_decay is None else init_linear_decay
+            self.linear_decay = nn.Parameter(- math.log(1 / init_linear_decay - 1) * torch.ones(inplane, dtype=torch.float))
+            init_v_subreset = init_v_threshold if init_v_subreset is None else init_v_subreset
+            self.v_subreset = nn.Parameter(- math.log(1 / init_v_subreset - 1) * torch.ones(inplane, dtype=torch.float))
+            self.conduct = nn.Parameter(- math.log(1 / init_conduct - 1) * torch.ones((T, inplane), dtype=torch.float))
+
+        else:   #layer-wise learnable params
+            self.alpha, self.beta, self.gamma = [nn.Parameter(torch.tensor(0.2 * (np.random.rand() - 0.5), dtype=torch.float)) for i in range(3)]
+            self.tau = nn.Parameter(torch.tensor(- math.log(1 / init_tau - 1), dtype=torch.float))
+            self.v_threshold = nn.Parameter(torch.tensor(- math.log(1 / init_v_threshold - 1), dtype=torch.float))
+            init_linear_decay = init_v_threshold / (T * 2) if init_linear_decay is None else init_linear_decay
+            self.linear_decay = nn.Parameter(torch.tensor(- math.log(1 / init_linear_decay - 1), dtype=torch.float))
+            init_v_subreset = init_v_threshold if init_v_subreset is None else init_v_subreset
+            self.v_subreset = nn.Parameter(torch.tensor(- math.log(1 / init_v_subreset - 1), dtype=torch.float))
+            self.conduct = nn.Parameter(- math.log(1 / init_conduct - 1) * torch.ones(T, dtype=torch.float))
+
+    @property
+    def supported_backends(self):
+        return 'torch'
+
+    def extra_repr(self):
+        with torch.no_grad():
+            tau = self.tau
+            v_subreset = self.v_subreset
+            linear_decay = self.linear_decay
+            conduct = self.conduct
+        return super().extra_repr() + f', tau={tau}' + f', v_subreset={v_subreset}' + f', linear_decay={linear_decay}' + f', conduct={conduct}'
+
+    def neuronal_charge(self, x: torch.Tensor, alpha: torch.Tensor, beta: torch.Tensor, t):
+        input = x * (1 - beta * (1 - self.conduct[t].view(1, -1, 1, 1).sigmoid()))
+        self.u = ((1 - alpha * (1 - self.tau.view(1, -1, 1, 1).sigmoid())) * self.v \
+                  - (1 - alpha) * self.linear_decay.view(1, -1, 1, 1).sigmoid()) \
+                 + input
+
+    def neuronal_reset(self, spike, alpha: torch.Tensor, gamma: torch.Tensor):
+        self.u = self.u - (1 - alpha * (1 - self.tau.view(1, -1, 1, 1).sigmoid())) * self.v * gamma * spike \
+                 - (1 - gamma) * self.v_subreset.view(1, -1, 1, 1).sigmoid() * spike
+
+    def neuronal_fire(self):
+        return self.surrogate_function(self.u - self.v_threshold.view(1, -1, 1, 1).sigmoid())
+
+    def multi_step_forward(self, x_seq: torch.Tensor):
+        alpha, beta, gamma = self.alpha.view(1, -1, 1, 1).sigmoid(), self.beta.view(1, -1, 1, 1).sigmoid(), self.gamma.view(1, -1, 1, 1).sigmoid()
+        y_seq = []
+        spike = torch.zeros(x_seq.shape[1:], device=x_seq.device)
+        for t in range(self.T):
+            self.neuronal_charge(x_seq[t], alpha, beta, t)
+            self.neuronal_reset(spike, alpha, gamma)
+            spike = self.neuronal_fire()
+            self.v = self.u
+            y_seq.append(spike)
+        return torch.stack(y_seq)
+
+
+##########################################################################################################
+# DSR modules
+##########################################################################################################
+
+import torch.distributed as dist
+
+class DSRIFNode(base.MemoryModule):
+    def __init__(self, T: int = 20, v_threshold: float = 6., alpha: float = 0.5, v_threshold_training: bool = True,
+                 v_threshold_grad_scaling: float = 1.0, v_threshold_lower_bound: float = 0.01, step_mode='m',
+                 backend='torch', **kwargs):
+
+        """
+        * :ref:`中文API <DSRIFNode.__init__-cn>`
+
+        .. _DSRIFNode.__init__-cn:
+
+        :param T: 时间步长
+        :type T: int
+
+        :param v_threshold: 神经元的阈值电压初始值
+        :type v_threshold: float
+
+        :param alpha: 放电阈值的缩放因子
+        :type alpha: float
+
+        :param v_threshold_training: 是否将阈值电压设置为可学习参数，默认为`'True'`
+        :type v_threshold_training: bool
+
+        :param v_threshold_grad_scaling: 对放电阈值的梯度进行缩放的缩放因子
+        :type v_threshold_grad_scaling: float
+
+        :param v_threshold_lower_bound: 训练过程中，阈值电压能取到的最小值
+        :type v_threshold_lower_bound: float
+
+        :param step_mode: 步进模式，只支持 `'m'` (多步)
+        :type step_mode: str
+
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+            使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的。DSR-IF只支持torch
+        :type backend: str
+
+        模型出处：`Training High-Performance Low-Latency Spiking Neural Networks by Differentiation on Spike Representation
+         <https://arxiv.org/pdf/2205.00459.pdf>`.
+
+
+        * :ref:`API in English <DSRIFNode.__init__-en>`
+
+        .. _DSRIFNode.__init__-en:
+
+        :param T: time-step
+        :type T: int
+
+        :param v_threshold: initial menbrane potential threshold
+        :type v_threshold: float
+
+        :param alpha: the scaling factor for the menbrane potential threshold
+        :type alpha: float
+
+        :param v_threshold_training: whether the menbrane potential threshold is trained, default: `'True'`
+        :type v_threshold_training: bool
+
+        :param v_threshold_grad_scaling: the scaling factor for the gradient of the menbrane potential threshold
+        :type v_threshold_grad_scaling: float
+
+        :param v_threshold_lower_bound: the minimum of the menbrane potential threshold during training
+        :type v_threshold_lower_bound: float
+
+        :param step_mode: step mode, only support `'m'` (multi-step)
+        :type step_mode: str
+
+        :param backend: backend fot this neuron layer, which can be "gemm" or "conv". This option only works for the multi-step mode
+        :type backend: str
+
+
+        DSR IF neuron refers to `Training High-Performance Low-Latency Spiking Neural Networks by Differentiation on Spike Representation
+         <https://arxiv.org/pdf/2205.00459.pdf>`.
+        """
+
+        assert isinstance(T, int) and T is not None
+        assert isinstance(v_threshold, float) and v_threshold >= v_threshold_lower_bound
+        assert isinstance(alpha, float) and alpha > 0.0 and alpha <= 1.0
+        assert isinstance(v_threshold_lower_bound, float) and v_threshold_lower_bound > 0.0
+        assert step_mode == 'm'
+
+        super().__init__()
+        self.backend = backend
+        self.step_mode = step_mode
+        self.T = T
+        if v_threshold_training:
+            self.v_threshold = nn.Parameter(torch.tensor(v_threshold))
+        else:
+            self.v_threshold = torch.tensor(v_threshold)
+        self.alpha = alpha
+        self.v_threshold_lower_bound = v_threshold_lower_bound
+        self.v_threshold_grad_scaling = v_threshold_grad_scaling
+
+    @property
+    def supported_backends(self):
+        return 'torch'
+
+    def extra_repr(self):
+        with torch.no_grad():
+            T = self.T
+            v_threshold = self.v_threshold
+            alpha = self.alpha
+            v_threshold_lower_bound = self.v_threshold_lower_bound
+            v_threshold_grad_scaling = self.v_threshold_grad_scaling
+        return f', T={T}' + f', init_vth={v_threshold}' + f', alpha={alpha}' + f', vth_bound={v_threshold_lower_bound}' + f', vth_g_scale={v_threshold_grad_scaling}'
+
+    def multi_step_forward(self, x_seq: torch.Tensor):
+        with torch.no_grad():
+            self.v_threshold.copy_(
+                F.relu(self.v_threshold - self.v_threshold_lower_bound) + self.v_threshold_lower_bound)
+        iffunc = self.DSRIFFunction.apply
+        y_seq = iffunc(x_seq, self.T, self.v_threshold, self.alpha, self.v_threshold_grad_scaling)
+        return y_seq
+
+
+    class DSRIFFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, inp, T=10, v_threshold=1.0, alpha=0.5, v_threshold_grad_scaling=1.0):
+            ctx.save_for_backward(inp)
+
+            mem_potential = torch.zeros_like(inp[0]).to(inp.device)
+            spikes = []
+
+            for t in range(inp.size(0)):
+                mem_potential = mem_potential + inp[t]
+                spike = ((mem_potential >= alpha * v_threshold).float() * v_threshold).float()
+                mem_potential = mem_potential - spike
+                spikes.append(spike)
+            output = torch.stack(spikes)
+
+            ctx.T = T
+            ctx.v_threshold = v_threshold
+            ctx.v_threshold_grad_scaling = v_threshold_grad_scaling
+            return output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            with torch.no_grad():
+                inp = ctx.saved_tensors[0]
+                T = ctx.T
+                v_threshold = ctx.v_threshold
+                v_threshold_grad_scaling = ctx.v_threshold_grad_scaling
+
+                input_rate_coding = torch.mean(inp, 0)
+                grad_output_coding = torch.mean(grad_output, 0) * T
+
+                input_grad = grad_output_coding.clone()
+                input_grad[(input_rate_coding < 0) | (input_rate_coding > v_threshold)] = 0
+                input_grad = torch.stack([input_grad for _ in range(T)]) / T
+
+                v_threshold_grad = grad_output_coding.clone()
+                v_threshold_grad[input_rate_coding <= v_threshold] = 0
+                v_threshold_grad = torch.sum(v_threshold_grad) * v_threshold_grad_scaling
+                if v_threshold_grad.is_cuda and torch.cuda.device_count() != 1:
+                    try:
+                        dist.all_reduce(v_threshold_grad, op=dist.ReduceOp.SUM)
+                    except:
+                        raise RuntimeWarning(
+                            'Something wrong with the `all_reduce` operation when summing up the gradient of v_threshold from multiple gpus. Better check the gpu status and try DistributedDataParallel.')
+
+                return input_grad, None, v_threshold_grad, None, None
+
+
+class DSRLIFNode(base.MemoryModule):
+    def __init__(self, T: int = 20, v_threshold: float = 1., tau: float = 2.0, delta_t: float = 0.05,
+                 alpha: float = 0.3, v_threshold_training: bool = True,
+                 v_threshold_grad_scaling: float = 1.0, v_threshold_lower_bound: float = 0.1, step_mode='m',
+                 backend='torch', **kwargs):
+
+        """
+        * :ref:`中文API <DSRLIFNode.__init__-cn>`
+
+        .. _DSRLIFNode.__init__-cn:
+
+        :param T: 时间步长
+        :type T: int
+
+        :param v_threshold: 神经元的阈值电压初始值
+        :type v_threshold: float
+
+        :param tau: 膜电位时间常数
+        :type tau: float
+
+        :param delta_t: 对微分方程形式的LIF模型进行离散化的步长
+        :type delta_t: float
+
+        :param alpha: 放电阈值的缩放因子
+        :type alpha: float
+
+        :param v_threshold_training: 是否将阈值电压设置为可学习参数，默认为`'True'`
+        :type v_threshold_training: bool
+
+        :param v_threshold_grad_scaling: 对放电阈值的梯度进行缩放的缩放因子
+        :type v_threshold_grad_scaling: float
+
+        :param v_threshold_lower_bound: 训练过程中，阈值电压能取到的最小值
+        :type v_threshold_lower_bound: float
+
+        :param step_mode: 步进模式，只支持 `'m'` (多步)
+        :type step_mode: str
+
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+            使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的。DSR-IF只支持torch
+        :type backend: str
+
+        模型出处：`Training High-Performance Low-Latency Spiking Neural Networks by Differentiation on Spike Representation
+         <https://arxiv.org/pdf/2205.00459.pdf>`.
+
+
+        * :ref:`API in English <DSRLIFNode.__init__-en>`
+
+        .. _DSRLIFNode.__init__-en:
+
+        :param T: time-step
+        :type T: int
+
+        :param v_threshold: initial menbrane potential threshold
+        :type v_threshold: float
+
+        :param tau: membrane time constant
+        :type tau: float
+
+        :param delta_t: discretization step for discretizing the ODE version of the LIF model
+        :type delta_t: float
+
+        :param alpha: the scaling factor for the menbrane potential threshold
+        :type alpha: float
+
+        :param v_threshold_training: whether the menbrane potential threshold is trained, default: `'True'`
+        :type v_threshold_training: bool
+
+        :param v_threshold_grad_scaling: the scaling factor for the gradient of the menbrane potential threshold
+        :type v_threshold_grad_scaling: float
+
+        :param v_threshold_lower_bound: the minimum of the menbrane potential threshold during training
+        :type v_threshold_lower_bound: float
+
+        :param step_mode: step mode, only support `'m'` (multi-step)
+        :type step_mode: str
+
+        :param backend: backend fot this neuron layer, which can be "gemm" or "conv". This option only works for the multi-step mode
+        :type backend: str
+
+
+        DSR LIF neuron refers to `Training High-Performance Low-Latency Spiking Neural Networks by Differentiation on Spike Representation
+         <https://arxiv.org/pdf/2205.00459.pdf>`.
+        """
+
+        assert isinstance(T, int) and T is not None
+        assert isinstance(v_threshold, float) and v_threshold >= v_threshold_lower_bound
+        assert isinstance(alpha, float) and alpha > 0.0 and alpha <= 1.0
+        assert isinstance(v_threshold_lower_bound, float) and v_threshold_lower_bound > 0.0
+        assert step_mode == 'm'
+
+        super().__init__()
+        self.backend = backend
+        self.step_mode = step_mode
+        self.T = T
+        if v_threshold_training:
+            self.v_threshold = nn.Parameter(torch.tensor(v_threshold))
+        else:
+            self.v_threshold = torch.tensor(v_threshold)
+        self.tau = tau
+        self.delta_t = delta_t
+        self.alpha = alpha
+        self.v_threshold_lower_bound = v_threshold_lower_bound
+        self.v_threshold_grad_scaling = v_threshold_grad_scaling
+
+    @property
+    def supported_backends(self):
+        return 'torch'
+
+    def extra_repr(self):
+        with torch.no_grad():
+            T = self.T
+            v_threshold = self.v_threshold
+            tau = self.tau
+            delta_t = self.delta_t
+            alpha = self.alpha
+            v_threshold_lower_bound = self.v_threshold_lower_bound
+            v_threshold_grad_scaling = self.v_threshold_grad_scaling
+        return f', T={T}' + f', init_vth={v_threshold}' + f', tau={tau}' + f', dt={delta_t}' + f', alpha={alpha}' + \
+               f', vth_bound={v_threshold_lower_bound}' + f', vth_g_scale={v_threshold_grad_scaling}'
+
+    def multi_step_forward(self, x_seq: torch.Tensor):
+        with torch.no_grad():
+            self.v_threshold.copy_(
+                F.relu(self.v_threshold - self.v_threshold_lower_bound) + self.v_threshold_lower_bound)
+        liffunc = self.DSRLIFFunction.apply
+        y_seq = liffunc(x_seq, self.T, self.v_threshold, self.tau, self.delta_t, self.alpha,
+                        self.v_threshold_grad_scaling)
+        return y_seq
+
+    @classmethod
+    def weight_rate_spikes(cls, data, tau, delta_t):
+        T = data.shape[0]
+        chw = data.size()[2:]
+        data_reshape = data.permute(list(range(1, len(chw) + 2)) + [0])
+        weight = torch.tensor([math.exp(-1 / tau * (delta_t * T - ii * delta_t)) for ii in range(1, T + 1)]).to(
+            data_reshape.device)
+        return (weight * data_reshape).sum(dim=len(chw) + 1) / weight.sum()
+
+    class DSRLIFFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, inp, T, v_threshold, tau, delta_t=0.05, alpha=0.3, v_threshold_grad_scaling=1.0):
+            ctx.save_for_backward(inp)
+
+            mem_potential = torch.zeros_like(inp[0]).to(inp.device)
+            beta = math.exp(-delta_t / tau)
+
+            spikes = []
+            for t in range(inp.size(0)):
+                mem_potential = beta * mem_potential + (1 - beta) * inp[t]
+                spike = ((mem_potential >= alpha * v_threshold).float() * v_threshold).float()
+                mem_potential = mem_potential - spike
+                spikes.append(spike / delta_t)
+            output = torch.stack(spikes)
+
+            ctx.T = T
+            ctx.v_threshold = v_threshold
+            ctx.tau = tau
+            ctx.delta_t = delta_t
+            ctx.v_threshold_grad_scaling = v_threshold_grad_scaling
+            return output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            inp = ctx.saved_tensors[0]
+            T = ctx.T
+            v_threshold = ctx.v_threshold
+            delta_t = ctx.delta_t
+            tau = ctx.tau
+            v_threshold_grad_scaling = ctx.v_threshold_grad_scaling
+
+            input_rate_coding = DSRLIFNode.weight_rate_spikes(inp, tau, delta_t)
+            grad_output_coding = DSRLIFNode.weight_rate_spikes(grad_output, tau, delta_t) * T
+
+            indexes = (input_rate_coding > 0) & (input_rate_coding < v_threshold / delta_t * tau)
+            input_grad = torch.zeros_like(grad_output_coding)
+            input_grad[indexes] = grad_output_coding[indexes].clone() / tau
+            input_grad = torch.stack([input_grad for _ in range(T)]) / T
+
+            v_threshold_grad = grad_output_coding.clone()
+            v_threshold_grad[input_rate_coding <= v_threshold / delta_t * tau] = 0
+            v_threshold_grad = torch.sum(v_threshold_grad) * delta_t * v_threshold_grad_scaling
+            if v_threshold_grad.is_cuda and torch.cuda.device_count() != 1:
+                try:
+                    dist.all_reduce(v_threshold_grad, op=dist.ReduceOp.SUM)
+                except:
+                    raise RuntimeWarning('Something wrong with the `all_reduce` operation when summing up the gradient of v_threshold from multiple gpus. Better check the gpu status and try DistributedDataParallel.')
+
+            return input_grad, None, v_threshold_grad, None, None, None, None
+
+
+##########################################################################################################
+# OTTT modules
+##########################################################################################################
+
+class OTTTLIFNode(LIFNode):
+    def __init__(self, tau: float = 2., decay_input: bool = False, v_threshold: float = 1.,
+                 v_reset: Optional[float] = None, surrogate_function: Callable = surrogate.Sigmoid(),
+                 detach_reset: bool = True, step_mode='s', backend='torch', store_v_seq: bool = False):
+        """
+        * :ref:`API in English <OTTTLIFNode.__init__-en>`
+
+        .. _OTTTLIFNode.__init__-cn:
+
+        :param tau: 膜电位时间常数
+        :type tau: float
+
+        :param decay_input: 输入是否也会参与衰减
+        :type decay_input: bool
+
+        :param v_threshold: 神经元的阈值电压
+        :type v_threshold: float
+
+        :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
+            如果设置为 ``None``，当神经元释放脉冲后，电压会被减去 ``v_threshold``
+        :type v_reset: Optional[float]
+
+        :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
+        :type surrogate_function: Callable
+
+        :param detach_reset: 是否将reset过程的计算图分离。该参数在本模块中不起作用，仅为保持代码统一而保留
+        :type detach_reset: bool
+
+        :param step_mode: 步进模式，为了保证神经元的显存占用小，仅可以为 `'s'` (单步)
+        :type step_mode: str
+
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+            使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的
+        :type backend: str
+
+        :param store_v_seq: 在使用 ``step_mode = 'm'`` 时，给与 ``shape = [T, N, *]`` 的输入后，是否保存中间过程的 ``shape = [T, N, *]``
+            的各个时间步的电压值 ``self.v_seq`` 。设置为 ``False`` 时计算完成后只保留最后一个时刻的电压，即 ``shape = [N, *]`` 的 ``self.v`` 。
+            通常设置成 ``False`` ，可以节省内存
+        :type store_v_seq: bool
+
+        神经元模型出处：`Online Training Through Time for Spiking Neural Networks <https://arxiv.org/pdf/2210.04195.pdf>`
+        模型正向传播和Leaky Integrate-and-Fire神经元相同；用于随时间在线训练
+
+
+        * :ref:`中文API <OTTTLIFNode.__init__-cn>`
+
+        .. _OTTTLIFNode.__init__-en:
+
+        :param tau: membrane time constant
+        :type tau: float
+
+        :param decay_input: whether the input will decay
+        :type decay_input: bool
+
+        :param v_threshold: threshold of this neurons layer
+        :type v_threshold: float
+
+        :param v_reset: reset voltage of this neurons layer. If not ``None``, the neuron's voltage will be set to ``v_reset``
+            after firing a spike. If ``None``, the neuron's voltage will subtract ``v_threshold`` after firing a spike
+        :type v_reset: Optional[float]
+
+        :param surrogate_function: the function for calculating surrogate gradients of the heaviside step function in backward
+        :type surrogate_function: Callable
+
+        :param detach_reset: whether detach the computation graph of reset in backward. this parameter does not take any effect in
+            the module, and is retained solely for code consistency
+        :type detach_reset: bool
+
+        :param step_mode: the step mode, which can solely be `s` (single-step) to guarantee the memory-efficient computation
+        :type step_mode: str
+
+        :param backend: backend fot this neurons layer. Different ``step_mode`` may support for different backends. The user can
+        print ``self.supported_backends`` and check what backends are supported by the current ``step_mode``. If supported,
+        using ``'cupy'`` backend will have the fastest training speed
+        :type backend: str
+
+        :param store_v_seq: when using ``step_mode = 'm'`` and given input with ``shape = [T, N, *]``, this option controls
+            whether storing the voltage at each time-step to ``self.v_seq`` with ``shape = [T, N, *]``. If set to ``False``,
+            only the voltage at last time-step will be stored to ``self.v`` with ``shape = [N, *]``, which can reduce the
+            memory consumption
+        :type store_v_seq: bool
+
+        OTTT LIF neuron refers to `Online Training Through Time for Spiking Neural Networks <https://arxiv.org/pdf/2210.04195.pdf>`
+        The forward propagation is the same as the Leaky Integrate-and-Fire neuron; used for online training through time
+
+        """
+
+        super().__init__(tau, decay_input, v_threshold, v_reset, surrogate_function, detach_reset, step_mode, backend, store_v_seq)
+        assert step_mode == 's', "Please use single-step mode to enable memory-efficient training."
+        """
+        膜电位将在前向传播过程中重新登记为缓存，以支持多卡分布式训练的情况下保留信息在各时刻进行多次反向传播
+
+        membrane potential will be registered as buffer during forward, to support multiple backpropagation for all time steps with 
+        reserved informtion under distributed training on multiple GPUs
+        """
+        self._memories.pop('v')
+
+    def reset(self):
+        super().reset()
+        if hasattr(self, 'v'):
+            del self.v
+        if hasattr(self, 'trace'):
+            del self.trace
+
+    @property
+    def supported_backends(self):
+        if self.step_mode == 's':
+            return ('torch')
+        else:
+            raise ValueError(self.step_mode)
+
+    def neuronal_charge(self, x: torch.Tensor):
+        self.v = self.v.detach()
+
+        if self.decay_input:
+            if self.v_reset is None or self.v_reset == 0.:
+                self.v = self.neuronal_charge_decay_input_reset0(x, self.v, self.tau)
+            else:
+                self.v = self.neuronal_charge_decay_input(x, self.v, self.v_reset, self.tau)
+
+        else:
+            if self.v_reset is None or self.v_reset == 0.:
+                self.v = self.neuronal_charge_no_decay_input_reset0(x, self.v, self.tau)
+            else:
+                self.v = self.neuronal_charge_no_decay_input(x, self.v, self.v_reset, self.tau)
+
+    @staticmethod
+    @torch.jit.script
+    def track_trace(spike: torch.Tensor, trace: torch.Tensor, tau: float):
+        with torch.no_grad():
+            trace = trace * (1. - 1. / tau) + spike
+        return trace
+
+
+    def single_step_forward(self, x: torch.Tensor):
+        """
+        训练时，输出脉冲和迹；推理时，输出脉冲
+        训练时需要将后续参数模块用layer.py中定义的GradwithTrace进行包装，根据迹计算梯度
+        
+        output spike and trace during training; output spike during inference
+        during training, successive parametric modules shoule be wrapped by GradwithTrace defined in layer.py, to calculate gradients with traces
+        """
+
+        if not hasattr(self, 'v'):
+            if self.v_reset is None:
+                self.register_buffer('v', torch.zeros_like(x))
+            else:
+                self.register_buffer('v', torch.ones_like(x) * self.v_reset)
+
+        if self.training:
+            if not hasattr(self, 'trace'):
+                self.register_buffer('trace', torch.zeros_like(x))
+    
+            if self.backend == 'torch':
+                self.neuronal_charge(x)
+                spike = self.neuronal_fire()
+                self.neuronal_reset(spike)
+
+                self.trace = self.track_trace(spike, self.trace, self.tau)
+
+                return [spike, self.trace]
+            else:
+                raise ValueError(self.backend)
+        else:
+            if self.v_reset is None:
+                if self.decay_input:
+                    spike, self.v = self.jit_eval_single_step_forward_soft_reset_decay_input(x, self.v,
+                                                                                             self.v_threshold, self.tau)
+                else:
+                    spike, self.v = self.jit_eval_single_step_forward_soft_reset_no_decay_input(x, self.v,
+                                                                                                self.v_threshold,
+                                                                                                self.tau)
+            else:
+                if self.decay_input:
+                    spike, self.v = self.jit_eval_single_step_forward_hard_reset_decay_input(x, self.v,
+                                                                                             self.v_threshold,
+                                                                                             self.v_reset, self.tau)
+                else:
+                    spike, self.v = self.jit_eval_single_step_forward_hard_reset_no_decay_input(x, self.v,
+                                                                                                self.v_threshold,
+                                                                                                self.v_reset,
+                                                                                                self.tau)
+            return spike
+
+
+##########################################################################################################
+# SLTT modules
+##########################################################################################################
+
+class SLTTLIFNode(LIFNode):
+    def __init__(self, tau: float = 2., decay_input: bool = True, v_threshold: float = 1.,
+                 v_reset: Optional[float] = 0., surrogate_function: Callable = surrogate.Sigmoid(),
+                 detach_reset: bool = True, step_mode='s', backend='torch', store_v_seq: bool = False):
+        """
+        * :ref:`API in English <SLTTLIFNode.__init__-en>`
+
+        .. _SLTTLIFNode.__init__-cn:
+
+        :param tau: 膜电位时间常数
+        :type tau: float
+
+        :param decay_input: 输入是否也会参与衰减
+        :type decay_input: bool
+
+        :param v_threshold: 神经元的阈值电压
+        :type v_threshold: float
+
+        :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
+            如果设置为 ``None``，当神经元释放脉冲后，电压会被减去 ``v_threshold``
+        :type v_reset: Optional[float]
+
+        :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
+        :type surrogate_function: Callable
+
+        :param detach_reset: 是否将reset过程的计算图分离。该参数在本模块中不起作用，仅为保持代码统一而保留
+        :type detach_reset: bool
+
+        :param step_mode: 步进模式，为了保证神经元的显存占用小，仅可以为 `'s'` (单步)
+        :type step_mode: str
+
+        :param backend: 使用哪种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+            使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的
+        :type backend: str
+
+        :param store_v_seq: 在使用 ``step_mode = 'm'`` 时，给与 ``shape = [T, N, *]`` 的输入后，是否保存中间过程的 ``shape = [T, N, *]``
+            的各个时间步的电压值 ``self.v_seq`` 。设置为 ``False`` 时计算完成后只保留最后一个时刻的电压，即 ``shape = [N, *]`` 的 ``self.v`` 。
+            通常设置成 ``False`` ，可以节省内存
+        :type store_v_seq: bool
+
+        神经元模型出处：`Towards Memory- and Time-Efficient Backpropagation for Training Spiking Neural Networks
+        <https://arxiv.org/pdf/2302.14311.pdf>`.模型正向传播和Leaky Integrate-and-Fire神经元相同.
+
+
+        * :ref:`中文API <SLTTLIFNode.__init__-cn>`
+
+        .. _SLTTLIFNode.__init__-en:
+
+        :param tau: membrane time constant
+        :type tau: float
+
+        :param decay_input: whether the input will decay
+        :type decay_input: bool
+
+        :param v_threshold: threshold of this neurons layer
+        :type v_threshold: float
+
+        :param v_reset: reset voltage of this neurons layer. If not ``None``, the neuron's voltage will be set to ``v_reset``
+            after firing a spike. If ``None``, the neuron's voltage will subtract ``v_threshold`` after firing a spike
+        :type v_reset: Optional[float]
+
+        :param surrogate_function: the function for calculating surrogate gradients of the heaviside step function in backward
+        :type surrogate_function: Callable
+
+        :param detach_reset: whether detach the computation graph of reset in backward. this parameter does not take any effect in
+            the module, and is retained solely for code consistency
+        :type detach_reset: bool
+
+        :param step_mode: the step mode, which can solely be `s` (single-step) to guarantee the memory-efficient computation
+        :type step_mode: str
+
+        :param backend: backend fot this neurons layer. Different ``step_mode`` may support for different backends. The user can
+        print ``self.supported_backends`` and check what backends are supported by the current ``step_mode``. If supported,
+        using ``'cupy'`` backend will have the fastest training speed
+        :type backend: str
+
+        :param store_v_seq: when using ``step_mode = 'm'`` and given input with ``shape = [T, N, *]``, this option controls
+            whether storing the voltage at each time-step to ``self.v_seq`` with ``shape = [T, N, *]``. If set to ``False``,
+            only the voltage at last time-step will be stored to ``self.v`` with ``shape = [N, *]``, which can reduce the
+            memory consumption
+        :type store_v_seq: bool
+
+        SLTT LIF neuron refers to `Towards Memory- and Time-Efficient Backpropagation for Training Spiking Neural Networks
+        <https://arxiv.org/pdf/2302.14311.pdf>`. The forward propagation is the same as the Leaky Integrate-and-Fire neuron's.
+
+        """
+
+        super().__init__(tau, decay_input, v_threshold, v_reset, surrogate_function, detach_reset, step_mode, backend, store_v_seq)
+        assert step_mode == 's', "Please use single-step mode to enable memory-efficient training."
+        self._memories.pop('v')
+
+    def reset(self):
+        super().reset()
+        if hasattr(self, 'v'):
+            del self.v
+
+    @property
+    def supported_backends(self):
+        if self.step_mode == 's':
+            return ('torch')
+        else:
+            raise ValueError(self.step_mode)
+
+    def neuronal_charge(self, x: torch.Tensor):
+        self.v = self.v.detach()
+
+        if self.decay_input:
+            if self.v_reset is None or self.v_reset == 0.:
+                self.v = self.neuronal_charge_decay_input_reset0(x, self.v, self.tau)
+            else:
+                self.v = self.neuronal_charge_decay_input(x, self.v, self.v_reset, self.tau)
+
+        else:
+            if self.v_reset is None or self.v_reset == 0.:
+                self.v = self.neuronal_charge_no_decay_input_reset0(x, self.v, self.tau)
+            else:
+                self.v = self.neuronal_charge_no_decay_input(x, self.v, self.v_reset, self.tau)
+
+    def single_step_forward(self, x: torch.Tensor):
+
+        if not hasattr(self, 'v'):
+            if self.v_reset is None:
+                self.register_buffer('v', torch.zeros_like(x))
+            else:
+                self.register_buffer('v', torch.ones_like(x) * self.v_reset)
+
+        if self.training:
+            if self.backend == 'torch':
+                self.neuronal_charge(x)
+                spike = self.neuronal_fire()
+                self.neuronal_reset(spike)
+                return spike
+            else:
+                raise ValueError(self.backend)
+        else:
+            if self.v_reset is None:
+                if self.decay_input:
+                    spike, self.v = self.jit_eval_single_step_forward_soft_reset_decay_input(x, self.v,
+                                                                                             self.v_threshold, self.tau)
+                else:
+                    spike, self.v = self.jit_eval_single_step_forward_soft_reset_no_decay_input(x, self.v,
+                                                                                                self.v_threshold,
+                                                                                                self.tau)
+            else:
+                if self.decay_input:
+                    spike, self.v = self.jit_eval_single_step_forward_hard_reset_decay_input(x, self.v,
+                                                                                             self.v_threshold,
+                                                                                             self.v_reset, self.tau)
+                else:
+                    spike, self.v = self.jit_eval_single_step_forward_hard_reset_no_decay_input(x, self.v,
+                                                                                                self.v_threshold,
+                                                                                                self.v_reset,
+                                                                                                self.tau)
+            return spike
+
+
+##########################################################################################################
+# Current-based LIF (CLIF) modules
+##########################################################################################################
+
+class CLIFNode(BaseNode):
+    def __init__(self, c_decay: float = 0.5, v_decay: float = 0.75, v_threshold: float = 0.5,
+                 v_reset: float = 0., surrogate_function: Callable = surrogate.Rect()):
+
+        super().__init__(v_threshold, v_reset, surrogate_function)
+
+        self.register_memory('c', 0.)
+
+        self.c_decay = c_decay
+        self.v_decay = v_decay
+
+    def neuronal_charge(self, x: torch.Tensor):
+        self.c = self.c * self.c_decay + x
+        self.v = self.v * self.v_decay + self.c
+
+    def single_step_forward(self, x: torch.Tensor):
+        self.v_float_to_tensor(x)
+        self.c_float_to_tensor(x)
+        self.neuronal_charge(x)
+        spike = self.neuronal_fire()
+        self.neuronal_reset(spike)
+        return spike
+
+    def multi_step_forward(self, x_seq: torch.Tensor):
+        T = x_seq.shape[0]
+        spike_seq = []
+
+        for t in range(T):
+            spike = self.single_step_forward(x_seq[t])
+            spike_seq.append(spike)
+
+        return torch.stack(spike_seq)
+
+    def c_float_to_tensor(self, c: torch.Tensor):
+        if isinstance(self.c, float):
+            c_init = self.c
+            self.c = torch.full_like(c.data, fill_value=c_init)
+
+
+##########################################################################################################
+# Noisy modules for exploration of RL
+##########################################################################################################
+
+"""Generate colored noise."""
+
+from typing import Union, Iterable, Optional
+from numpy import sqrt, newaxis, integer
+from numpy.fft import irfft, rfftfreq
+from numpy.random import default_rng, Generator, RandomState
+from numpy import sum as npsum
+
+
+def powerlaw_psd_gaussian(
+        exponent: float, 
+        size: Union[int, Iterable[int]], 
+        fmin: float = 0.0, 
+        random_state: Optional[Union[int, Generator, RandomState]] = None
+    ):
+    """Gaussian (1/f)**beta noise.
+
+    Based on the algorithm in:
+    Timmer, J. and Koenig, M.:
+    On generating power law noise.
+    Astron. Astrophys. 300, 707-710 (1995)
+
+    Normalised to unit variance
+
+    Parameters:
+    -----------
+
+    exponent : float
+        The power-spectrum of the generated noise is proportional to
+
+        S(f) = (1 / f)**beta
+        flicker / pink noise:   exponent beta = 1
+        brown noise:            exponent beta = 2
+
+        Furthermore, the autocorrelation decays proportional to lag**-gamma
+        with gamma = 1 - beta for 0 < beta < 1.
+        There may be finite-size issues for beta close to one.
+
+    size : Union[int, Iterable[int]]
+        The output has the given shape, and the desired power spectrum in
+        the last coordinate. That is, the last dimension is taken as time,
+        and all other components are independent.
+
+    fmin : float, optional
+        Low-frequency cutoff.
+        Default: 0 corresponds to original paper. 
+        
+        The power-spectrum below fmin is flat. fmin is defined relative
+        to a unit sampling rate (see numpy's rfftfreq). For convenience,
+        the passed value is mapped to max(fmin, 1/samples) internally
+        since 1/samples is the lowest possible finite frequency in the
+        sample. The largest possible value is fmin = 0.5, the Nyquist
+        frequency. The output for this value is white noise.
+
+    random_state :  int, numpy.integer, numpy.random.Generator, numpy.random.RandomState, 
+                    optional
+        Optionally sets the state of NumPy's underlying random number generator.
+        Integer-compatible values or None are passed to np.random.default_rng.
+        np.random.RandomState or np.random.Generator are used directly.
+        Default: None.
+
+    Returns
+    -------
+    out : array
+        The samples.
+
+
+    Examples:
+    ---------
+
+    # generate 1/f noise == pink noise == flicker noise
+    >>> import colorednoise as cn
+    >>> y = cn.powerlaw_psd_gaussian(1, 5)
+    """
+    
+    # Make sure size is a list so we can iterate it and assign to it.
+    if isinstance(size, (integer, int)):
+        size = [size]
+    elif isinstance(size, Iterable):
+        size = list(size)
+    else:
+        raise ValueError("Size must be of type int or Iterable[int]")
+    
+    # The number of samples in each time series
+    samples = size[-1]
+    
+    # Calculate Frequencies (we asume a sample rate of one)
+    # Use fft functions for real output (-> hermitian spectrum)
+    f = rfftfreq(samples) # type: ignore # mypy 1.5.1 has problems here 
+    
+    # Validate / normalise fmin
+    if 0 <= fmin <= 0.5:
+        fmin = max(fmin, 1./samples) # Low frequency cutoff
+    else:
+        raise ValueError("fmin must be chosen between 0 and 0.5.")
+    
+    # Build scaling factors for all frequencies
+    s_scale = f    
+    ix   = npsum(s_scale < fmin)   # Index of the cutoff
+    if ix and ix < len(s_scale):
+        s_scale[:ix] = s_scale[ix]
+    s_scale = s_scale**(-exponent/2.)
+    
+    # Calculate theoretical output standard deviation from scaling
+    w      = s_scale[1:].copy()
+    w[-1] *= (1 + (samples % 2)) / 2. # correct f = +-0.5
+    sigma = 2 * sqrt(npsum(w**2)) / samples
+    
+    # Adjust size to generate one Fourier component per frequency
+    size[-1] = len(f)
+
+    # Add empty dimension(s) to broadcast s_scale along last
+    # dimension of generated random power + phase (below)
+    dims_to_add = len(size) - 1
+    s_scale     = s_scale[(newaxis,) * dims_to_add + (Ellipsis,)]
+    
+    # prepare random number generator
+    normal_dist = _get_normal_distribution(random_state)
+
+    # Generate scaled random power + phase
+    sr = normal_dist(scale=s_scale, size=size)
+    si = normal_dist(scale=s_scale, size=size)
+    
+    # If the signal length is even, frequencies +/- 0.5 are equal
+    # so the coefficient must be real.
+    if not (samples % 2):
+        si[..., -1] = 0
+        sr[..., -1] *= sqrt(2)    # Fix magnitude
+    
+    # Regardless of signal length, the DC component must be real
+    si[..., 0] = 0
+    sr[..., 0] *= sqrt(2)    # Fix magnitude
+    
+    # Combine power + corrected phase to Fourier components
+    s  = sr + 1J * si
+    
+    # Transform to real time series & scale to unit variance
+    y = irfft(s, n=samples, axis=-1) / sigma
+    
+    return y
+
+
+def _get_normal_distribution(random_state: Optional[Union[int, Generator, RandomState]]):
+    normal_dist = None
+    if isinstance(random_state, (integer, int)) or random_state is None:
+        random_state = default_rng(random_state)
+        normal_dist = random_state.normal
+    elif isinstance(random_state, (Generator, RandomState)):
+        normal_dist = random_state.normal
+    else:
+        raise ValueError(
+            "random_state must be one of integer, numpy.random.Generator, "
+            "numpy.random.Randomstate"
+        )
+    return normal_dist
+
+class NoisyBaseNode(nn.Module, base.MultiStepModule):
+    def __init__(self, num_node, is_training: bool = True, T: int = 5, sigma_init: float = 0.5, 
+                 beta: float = 0.0, v_threshold: float = 0.5, v_reset: Optional[float] = 0.,
+                 surrogate_function: Callable = surrogate.Rect()):
+        assert isinstance(v_reset, float) or v_reset is None
+        assert isinstance(v_threshold, float)
+        super().__init__()
+
+        self.num_node = num_node
+        self.is_training = is_training
+        self.T = T
+        self.beta = beta
+
+        self.sigma_v = sigma_init / math.sqrt(num_node)
+        self.cn_v = None
+
+        self.sigma_s = sigma_init / math.sqrt(num_node)
+        self.cn_s = None
+
+        self.v_threshold = v_threshold
+        self.v_reset = v_reset
+
+        self.surrogate_function = surrogate_function
+
+    @abstractmethod
+    def neuronal_charge(self, x: torch.Tensor):
+        raise NotImplementedError
+
+    def neuronal_fire(self):
+        return self.surrogate_function(self.v - self.v_threshold)
+
+    def neuronal_reset(self, spike):
+        if self.v_reset is None:
+            self.v = self.v - spike * self.v_threshold
+        else:
+            self.v = (1. - spike) * self.v + spike * self.v_reset
+
+    def init_tensor(self, data: torch.Tensor):
+        self.v = torch.full_like(data, fill_value=self.v_reset)
+
+    def forward(self, x_seq: torch.Tensor):
+        self.init_tensor(x_seq[0].data)
+        
+        y = []
+
+        if self.is_training:
+            if self.cn_v is None or self.cn_s is None:
+                self.noise_step += 1
+
+            for t in range(self.T):      
+                if self.cn_v is None:
+                    self.neuronal_charge(x_seq[t] + self.sigma_v * self.eps_v_seq[self.noise_step][t].to(x_seq.device))
+                else:
+                    self.neuronal_charge(x_seq[t] + self.sigma_v * self.cn_v[:, t])
+                spike = self.neuronal_fire()
+                self.neuronal_reset(spike)
+                if self.cn_s is None:
+                    spike = spike + self.sigma_s * self.eps_s_seq[self.noise_step][t].to(x_seq.device)
+                else:
+                    spike = spike + self.sigma_s * self.cn_s[:, t]
+                y.append(spike)
+            
+        else:
+            for t in range(self.T):
+                self.neuronal_charge(x_seq[t])
+                spike = self.neuronal_fire()
+                self.neuronal_reset(spike)
+                y.append(spike)
+
+        return torch.stack(y)
+        
+    def reset_noise(self, num_rl_step):
+        eps_shape = [self.num_node, num_rl_step * self.T]
+        per_order = [1, 2, 0]
+        # (nodes, steps * T) -> (nodes, steps, T) -> (steps, T, nodes)
+        self.eps_v_seq = torch.FloatTensor(powerlaw_psd_gaussian(self.beta, eps_shape).reshape(self.num_node, num_rl_step, self.T)).permute(per_order)
+        self.eps_s_seq = torch.FloatTensor(powerlaw_psd_gaussian(self.beta, eps_shape).reshape(self.num_node, num_rl_step, self.T)).permute(per_order)
+        self.noise_step = -1
+
+    def get_colored_noise(self):
+        cn = [self.eps_v_seq[self.noise_step], self.eps_s_seq[self.noise_step]]
+        return torch.cat(cn, dim=1)
+
+    def load_colored_noise(self, cn):
+        self.cn_v = cn[:, :, :self.num_node]
+        self.cn_s = cn[:, :, self.num_node:]
+
+    def cancel_load(self):
+        self.cn_v = None
+        self.cn_s = None
+
+
+class NoisyCLIFNode(NoisyBaseNode):
+    def __init__(self, num_node, c_decay: float = 0.5, v_decay: float = 0.75, is_training: bool = True, 
+                 T: int = 5, sigma_init: float = 0.5, beta: float = 0.0, v_threshold: float = 0.5, 
+                 v_reset: Optional[float] = 0., surrogate_function: Callable = surrogate.Rect()):
+        super().__init__(num_node, is_training, T, sigma_init, beta, v_threshold, 
+                         v_reset, surrogate_function)
+
+        self.c_decay = c_decay
+        self.v_decay = v_decay
+
+    def neuronal_charge(self, x: torch.Tensor):
+        self.c = self.c * self.c_decay + x
+        self.v = self.v * self.v_decay + self.c
+
+    def init_tensor(self, data: torch.Tensor):
+        self.c = torch.full_like(data, fill_value=0.0)
+        self.v = torch.full_like(data, fill_value=self.v_reset)
+
+
+##########################################################################################################
+# Inter-Layer Connections (ILC) modules for population-coded spiking actor network
+##########################################################################################################
+
+class ILCBaseNode(nn.Module, base.MultiStepModule):
+    def __init__(self, act_dim, dec_pop_dim, v_threshold: float = 1.0, v_reset: Optional[float] = 0.,
+                 surrogate_function: Callable = surrogate.Rect()):
+
+        assert isinstance(v_reset, float) or v_reset is None
+        assert isinstance(v_threshold, float)
+        super().__init__()
+
+        self.act_dim = act_dim
+        self.out_pop_dim = act_dim * dec_pop_dim
+        self.dec_pop_dim = dec_pop_dim
+
+        self.conn = nn.Conv1d(act_dim, self.out_pop_dim, dec_pop_dim, groups=act_dim)
+
+        self.v_threshold = v_threshold
+        self.v_reset = v_reset
+
+        self.surrogate_function = surrogate_function
+
+    @abstractmethod
+    def neuronal_charge(self, x: torch.Tensor):
+        raise NotImplementedError
+
+    def neuronal_fire(self):
+        return self.surrogate_function(self.v - self.v_threshold)
+
+    def neuronal_reset(self, spike):
+        if self.v_reset is None:
+            self.v = self.v - spike * self.v_threshold
+        else:
+            self.v = (1. - spike) * self.v + spike * self.v_reset
+
+    def init_tensor(self, data: torch.Tensor):
+        self.v = torch.full_like(data, fill_value=self.v_reset)
+
+    def forward(self, x_seq: torch.Tensor):
+        self.init_tensor(x_seq[0].data)
+
+        T = x_seq.shape[0]
+        spike_seq = []
+
+        for t in range(T):
+            self.neuronal_charge(x_seq[t])
+            spike = self.neuronal_fire()
+            self.neuronal_reset(spike)
+            spike_seq.append(spike)
+            if t < T - 1:
+                x_seq[t + 1] = x_seq[t + 1] + self.conn(spike.view(-1, self.act_dim, self.dec_pop_dim)).view(-1, self.out_pop_dim)
+
+        return torch.stack(spike_seq)
+
+
+class ILCCLIFNode(ILCBaseNode):
+    def __init__(self, act_dim, dec_pop_dim, c_decay: float = 0.5, v_decay: float = 0.75,
+                 v_threshold: float = 0.5, v_reset: Optional[float] = 0.,
+                 surrogate_function: Callable = surrogate.Rect()):
+
+        super().__init__(act_dim, dec_pop_dim, v_threshold, v_reset, surrogate_function)
+
+        self.c_decay = c_decay
+        self.v_decay = v_decay
+
+    def neuronal_charge(self, x: torch.Tensor):
+        self.c = self.c * self.c_decay + x
+        self.v = self.v * self.v_decay + self.c
+
+    def init_tensor(self, data: torch.Tensor):
+        self.c = torch.full_like(data, fill_value=0.0)
+        self.v = torch.full_like(data, fill_value=self.v_reset)
+
+
+class ILCLIFNode(ILCBaseNode):
+    def __init__(self, act_dim, dec_pop_dim, v_decay: float = 0.75,
+                 v_threshold: float = 1.0, v_reset: Optional[float] = 0.,
+                 surrogate_function: Callable = surrogate.Rect()):
+
+        super().__init__(act_dim, dec_pop_dim, v_threshold, v_reset, surrogate_function)
+
+        self.v_decay = v_decay
+
+    def neuronal_charge(self, x: torch.Tensor):
+        self.v = self.v * self.v_decay + x
+
+
+class ILCIFNode(ILCBaseNode):
+    def __init__(self, act_dim, dec_pop_dim, v_threshold: float = 1.0, v_reset: Optional[float] = 0.,
+                 surrogate_function: Callable = surrogate.Rect()):
+
+        super().__init__(act_dim, dec_pop_dim, v_threshold, v_reset, surrogate_function)
+
+    def neuronal_charge(self, x: torch.Tensor):
+        self.v = self.v + x
+
+
+##########################################################################################################
+# Noisy modules with Inter-Layer Connections (ILC)
+##########################################################################################################
+
+class NoisyILCBaseNode(nn.Module, base.MultiStepModule):
+    def __init__(self, act_dim, dec_pop_dim, is_training: bool = True, T: int = 5, 
+                 sigma_init: float = 0.5, beta: float = 0.0, v_threshold: float = 1.0, 
+                 v_reset: Optional[float] = 0., surrogate_function: Callable = surrogate.Rect()):
+
+        assert isinstance(v_reset, float) or v_reset is None
+        assert isinstance(v_threshold, float)
+        super().__init__()
+
+        self.act_dim = act_dim
+        self.num_node = act_dim * dec_pop_dim
+        self.dec_pop_dim = dec_pop_dim
+
+        self.conn = nn.Conv1d(act_dim, self.num_node, dec_pop_dim, groups=act_dim)
+
+        self.is_training = is_training
+        self.T = T
+        self.beta = beta
+
+        self.sigma_v = sigma_init / math.sqrt(self.num_node)
+        self.cn_v = None
+
+        self.sigma_s = sigma_init / math.sqrt(self.num_node)
+        self.cn_s = None
+
+        self.v_threshold = v_threshold
+        self.v_reset = v_reset
+
+        self.surrogate_function = surrogate_function
+
+    @abstractmethod
+    def neuronal_charge(self, x: torch.Tensor):
+        raise NotImplementedError
+
+    def neuronal_fire(self):
+        return self.surrogate_function(self.v - self.v_threshold)
+
+    def neuronal_reset(self, spike):
+        if self.v_reset is None:
+            self.v = self.v - spike * self.v_threshold
+        else:
+            self.v = (1. - spike) * self.v + spike * self.v_reset
+
+    def init_tensor(self, data: torch.Tensor):
+        self.v = torch.full_like(data, fill_value=self.v_reset)
+
+    def forward(self, x_seq: torch.Tensor):
+        self.init_tensor(x_seq[0].data)
+
+        y = []
+
+        if self.is_training:
+            if self.cn_v is None or self.cn_s is None:
+                self.noise_step += 1
+
+            for t in range(self.T):      
+                if self.cn_v is None:
+                    self.neuronal_charge(x_seq[t] + self.sigma_v * self.eps_v_seq[self.noise_step][t].to(x_seq.device))
+                else:
+                    self.neuronal_charge(x_seq[t] + self.sigma_v * self.cn_v[:, t])
+                spike = self.neuronal_fire()
+                self.neuronal_reset(spike)
+                if self.cn_s is None:
+                    spike = spike + self.sigma_s * self.eps_s_seq[self.noise_step][t].to(x_seq.device)
+                else:
+                    spike = spike + self.sigma_s * self.cn_s[:, t]
+                y.append(spike)
+
+                if t < self.T - 1:
+                    x_seq[t + 1] = x_seq[t + 1] + self.conn(spike.view(-1, self.act_dim, self.dec_pop_dim)).view(-1, self.num_node)
+            
+        else:
+            for t in range(self.T):
+                self.neuronal_charge(x_seq[t])
+                spike = self.neuronal_fire()
+                self.neuronal_reset(spike)
+                y.append(spike)
+
+                if t < self.T - 1:
+                    x_seq[t + 1] = x_seq[t + 1] + self.conn(spike.view(-1, self.act_dim, self.dec_pop_dim)).view(-1, self.num_node)
+
+        return torch.stack(y)
+        
+    def reset_noise(self, num_rl_step):
+        eps_shape = [self.num_node, num_rl_step * self.T]
+        per_order = [1, 2, 0]
+        # (nodes, steps * T) -> (nodes, steps, T) -> (steps, T, nodes)
+        self.eps_v_seq = torch.FloatTensor(powerlaw_psd_gaussian(self.beta, eps_shape).reshape(self.num_node, num_rl_step, self.T)).permute(per_order)
+        self.eps_s_seq = torch.FloatTensor(powerlaw_psd_gaussian(self.beta, eps_shape).reshape(self.num_node, num_rl_step, self.T)).permute(per_order)
+        self.noise_step = -1
+
+    def get_colored_noise(self):
+        cn = [self.eps_v_seq[self.noise_step], self.eps_s_seq[self.noise_step]]
+        return torch.cat(cn, dim=1)
+
+    def load_colored_noise(self, cn):
+        self.cn_v = cn[:, :, :self.num_node]
+        self.cn_s = cn[:, :, self.num_node:]
+
+    def cancel_load(self):
+        self.cn_v = None
+        self.cn_s = None
+
+
+class NoisyILCCLIFNode(NoisyILCBaseNode):
+    def __init__(self, act_dim, dec_pop_dim, c_decay: float = 0.5, v_decay: float = 0.75,
+                 is_training: bool = True, T: int = 5, sigma_init: float = 0.5, 
+                 beta: float = 0.0, v_threshold: float = 1.0, v_reset: Optional[float] = 0.,
+                 surrogate_function: Callable = surrogate.Rect()):
+        super().__init__(act_dim, dec_pop_dim, is_training, T, sigma_init, beta, v_threshold, 
+                         v_reset, surrogate_function)
+
+        self.c_decay = c_decay
+        self.v_decay = v_decay
+
+    def neuronal_charge(self, x: torch.Tensor):
+        self.c = self.c * self.c_decay + x
+        self.v = self.v * self.v_decay + self.c
+
+    def init_tensor(self, data: torch.Tensor):
+        self.c = torch.full_like(data, fill_value=0.0)
+        self.v = torch.full_like(data, fill_value=self.v_reset)
+
+
+##########################################################################################################
+# Non-spiking modules for floating-point output
+##########################################################################################################
+
+class NonSpikingBaseNode(nn.Module, base.MultiStepModule):
+    def __init__(self, decode='last-mem'):
+        super().__init__()
+
+        self.decode = decode
+
+    @abstractmethod
+    def neuronal_charge(self, x: torch.Tensor):
+        raise NotImplementedError
+
+    def forward(self, x_seq: torch.Tensor):
+        self.v = torch.full_like(x_seq[0].data, fill_value=0.0)
+
+        T = x_seq.shape[0]
+        v_seq = []
+
+        for t in range(T):
+            self.neuronal_charge(x_seq[t])
+            v_seq.append(self.v)
+
+        if self.decode == 'max-mem':
+            mem = torch.max(torch.stack(v_seq, 0), 0).values
+
+        elif self.decode == 'max-abs-mem':
+            v_stack = torch.stack(v_seq, 0)
+            max_mem = torch.max(v_stack, 0).values
+            min_mem = torch.min(v_stack, 0).values
+            mem = max_mem * (max_mem.abs() > min_mem.abs()) + min_mem * (max_mem.abs() <= min_mem.abs())
+
+        elif self.decode == 'mean-mem':
+            mem = torch.mean(torch.stack(v_seq, 0), 0)
+
+        else:  # 'last-mem'
+            mem = v_seq[-1]
+
+        return mem
+
+
+class NonSpikingIFNode(NonSpikingBaseNode):
+    def __init__(self, decode='last-mem'):
+        super().__init__(decode)
+
+    def neuronal_charge(self, x: torch.Tensor):
+        self.v = self.v + x
+
+
+class NonSpikingLIFNode(NonSpikingBaseNode):
+    def __init__(self, tau: float = 2., decode='last-mem'):
+        super().__init__(decode)
+
+        self.tau = tau
+
+    def neuronal_charge(self, x: torch.Tensor):
+        self.v = self.v + (x - self.v) / self.tau
+
+
+##########################################################################################################
+# Noisy Non-spiking modules
+##########################################################################################################
+
+class NoisyNonSpikingBaseNode(nn.Module, base.MultiStepModule):
+    def __init__(self, num_node, is_training: bool = True, T: int = 5, 
+                 sigma_init: float = 0.5, beta: float = 0.0, decode: str = 'last-mem'):
+        super().__init__()
+
+        self.num_node = num_node
+        self.is_training = is_training
+        self.T = T
+        self.beta = beta
+        self.decode = decode
+
+        self.sigma = nn.Parameter(torch.FloatTensor(num_node))
+        self.sigma.data.fill_(sigma_init / math.sqrt(num_node))
+        self.cn = None
+
+    @abstractmethod
+    def neuronal_charge(self, x: torch.Tensor):
+        raise NotImplementedError
+
+    def init_tensor(self, data: torch.Tensor):
+        self.v = torch.full_like(data, fill_value=0.0)
+
+    def forward(self, x_seq: torch.Tensor):
+        self.init_tensor(x_seq[0].data)
+
+        v_seq = []
+
+        if self.is_training:
+            if self.cn is None:
+                self.noise_step += 1
+
+            for t in range(self.T):
+                if self.cn is None:
+                    self.neuronal_charge(x_seq[t] + self.sigma.mul(self.eps_seq[self.noise_step][t].to(x_seq.device)))
+                else:
+                    self.neuronal_charge(x_seq[t] + self.sigma.mul(self.cn[:, t].to(x_seq.device)))
+                v_seq.append(self.v)
+                
+        else:
+            for t in range(self.T):
+                self.neuronal_charge(x_seq[t])
+                v_seq.append(self.v)
+
+        if self.decode == 'max-mem':
+            mem = torch.max(torch.stack(v_seq, 0), 0).values
+
+        elif self.decode == 'max-abs-mem':
+            v_stack = torch.stack(v_seq, 0)
+            max_mem = torch.max(v_stack, 0).values
+            min_mem = torch.min(v_stack, 0).values
+            mem = max_mem * (max_mem.abs() > min_mem.abs()) + min_mem * (max_mem.abs() <= min_mem.abs())
+
+        elif self.decode == 'mean-mem':
+            mem = torch.mean(torch.stack(v_seq, 0), 0)
+
+        else:  # 'last-mem'
+            mem = v_seq[-1]
+
+        return mem
+
+    def reset_noise(self, num_rl_step):
+        eps_shape = [self.num_node, num_rl_step * self.T]
+        per_order = [1, 2, 0]
+        self.eps_seq = torch.FloatTensor(powerlaw_psd_gaussian(self.beta, eps_shape).reshape(self.num_node, num_rl_step, self.T)).permute(per_order)
+        self.noise_step = -1
+
+    def get_colored_noise(self):
+        return self.eps_seq[self.noise_step]
+
+    def load_colored_noise(self, cn):
+        self.cn = cn
+
+    def cancel_load(self):
+        self.cn = None
+
+
+class NoisyNonSpikingIFNode(NoisyNonSpikingBaseNode):
+    def neuronal_charge(self, x: torch.Tensor):
+        self.v = self.v + x

@@ -6,10 +6,11 @@ import torch.nn.functional as F
 import math
 from . import base, functional
 from torch import Tensor
-from torch.nn.common_types import _size_any_t, _size_1_t, _size_2_t, _size_3_t
+from torch.nn.common_types import _size_any_t, _size_1_t, _size_2_t, _size_3_t, _ratio_any_t
 from typing import Optional, List, Tuple, Union
 from typing import Callable
 from torch.nn.modules.batchnorm import _BatchNorm
+import numpy as np
 
 
 class MultiStepContainer(nn.Sequential, base.MultiStepModule):
@@ -49,6 +50,46 @@ class SeqToANNContainer(nn.Sequential, base.MultiStepModule):
         """
         return functional.seq_to_ann_forward(x_seq, super().forward)
 
+
+
+class TLastMultiStepContainer(nn.Sequential, base.MultiStepModule):
+    def __init__(self, *args):
+        super().__init__(*args)
+        for m in self:
+            assert not hasattr(m, 'step_mode') or m.step_mode == 's'
+            if isinstance(m, base.StepModule):
+                if 'm' in m.supported_step_mode():
+                    logging.warning(f"{m} supports for step_mode == 's', which should not be contained by MultiStepContainer!")
+    def forward(self, x_seq: Tensor):
+        """
+        :param x_seq: ``shape=[batch_size, ..., T]``
+        :type x_seq: Tensor
+        :return: y_seq with ``shape=[batch_size, ..., T]``
+        :rtype: Tensor
+        """
+        return functional.t_last_seq_to_ann_forward(x_seq, super().forward)
+    
+class TLastSeqToANNContainer(nn.Sequential, base.MultiStepModule):
+    def __init__(self, *args):
+        """
+        Please refer to :class:`spikingjelly.activation_based.functional.t_last_seq_to_ann_forward` .
+        """
+        super().__init__(*args)
+        for m in self:
+            assert not hasattr(m, 'step_mode') or m.step_mode == 's'
+            if isinstance(m, base.StepModule):
+                if 'm' in m.supported_step_mode():
+                    logging.warning(f"{m} supports for step_mode == 's', which should not be contained by SeqToANNContainer!")
+
+
+    def forward(self, x_seq: Tensor):
+        """
+        :param x_seq: shape=[batch_size, ..., T]
+        :type x_seq: Tensor
+        :return: y_seq, shape=[batch_size, ..., T]
+        :rtype: Tensor
+        """
+        return functional.t_last_seq_to_ann_forward(x_seq, super().forward) 
 
 class StepModeContainer(nn.Sequential, base.StepModule):
     def __init__(self, stateful: bool, *args):
@@ -218,6 +259,49 @@ class Conv3d(nn.Conv3d, base.StepModule):
         elif self.step_mode == 'm':
             if x.dim() != 6:
                 raise ValueError(f'expected x with shape [T, N, C, D, H, W], but got x with shape {x.shape}!')
+            x = functional.seq_to_ann_forward(x, super().forward)
+
+        return x
+
+class Upsample(nn.Upsample, base.StepModule):
+    def __init__(self,
+                 size: Optional[_size_any_t] = None,
+                 scale_factor: Optional[_ratio_any_t] = None,
+                 mode: str = 'nearest',
+                 align_corners: Optional[bool] = None,
+                 recompute_scale_factor: Optional[bool] = None,
+                 step_mode: str = 's'
+    ) -> None:
+        """
+        * :ref:`API in English <Upsample-en>`
+
+        .. _Upsample-cn:
+
+        :param step_mode: 步进模式，可以为 `'s'` (单步) 或 `'m'` (多步)
+        :type step_mode: str
+
+        其他的参数API参见 :class:`torch.nn.Upsample`
+
+        * :ref:`中文 API <Upsample-cn>`
+
+        .. _Upsample-en:
+
+        :param step_mode: the step mode, which can be `s` (single-step) or `m` (multi-step)
+        :type step_mode: str
+
+        Refer to :class:`torch.nn.Upsample` for other parameters' API
+        """
+        super().__init__(size, scale_factor, mode, align_corners, recompute_scale_factor)
+        self.step_mode = step_mode
+
+    def extra_repr(self):
+        return super().extra_repr() + f', step_mode={self.step_mode}'
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self.step_mode == 's':
+            x = super().forward(x)
+
+        elif self.step_mode == 'm':
             x = functional.seq_to_ann_forward(x, super().forward)
 
         return x
@@ -416,8 +500,8 @@ class BatchNorm1d(nn.BatchNorm1d, base.StepModule):
             return super().forward(x)
 
         elif self.step_mode == 'm':
-            if x.dim() != 4:
-                raise ValueError(f'expected x with shape [T, N, C, L], but got x with shape {x.shape}!')
+            if x.dim() != 4 and x.dim() != 3:
+                raise ValueError(f'expected x with shape [T, N, C, L] or [T, N, C], but got x with shape {x.shape}!')
             return functional.seq_to_ann_forward(x, super().forward)
 
 class BatchNorm2d(nn.BatchNorm2d, base.StepModule):
@@ -1367,7 +1451,7 @@ class SynapseFilter(base.MemoryModule):
 
 class DropConnectLinear(base.MemoryModule):
     def __init__(self, in_features: int, out_features: int, bias: bool = True, p: float = 0.5, samples_num: int = 1024,
-                 invariant: bool = False, activation: None or nn.Module = nn.ReLU(), state_mode='s') -> None:
+                 invariant: bool = False, activation: Optional[nn.Module] = nn.ReLU(), step_mode='s') -> None:
         """
         * :ref:`API in English <DropConnectLinear.__init__-en>`
 
@@ -1391,7 +1475,7 @@ class DropConnectLinear(base.MemoryModule):
             默认为 ``False``
         :type invariant: bool
         :param activation: 在线性层后的激活层
-        :type activation: None or nn.Module
+        :type activation: Optional[nn.Module]
         :param step_mode: 步进模式，可以为 `'s'` (单步) 或 `'m'` (多步)
         :type step_mode: str
 
@@ -1426,7 +1510,7 @@ class DropConnectLinear(base.MemoryModule):
             for more information to understand this parameter. Default: ``False``
         :type invariant: bool
         :param activation: the activation layer after the linear layer
-        :type activation: None or nn.Module
+        :type activation: Optional[nn.Module]
         :param step_mode: the step mode, which can be `s` (single-step) or `m` (multi-step)
         :type step_mode: str
 
@@ -1444,7 +1528,7 @@ class DropConnectLinear(base.MemoryModule):
             ``activation`` as a member variable of this module.
         """
         super().__init__()
-        self.state_mode = state_mode
+        self.step_mode = step_mode
         self.in_features = in_features
         self.out_features = out_features
         self.weight = nn.Parameter(Tensor(out_features, in_features))
@@ -1829,6 +1913,7 @@ class _ThresholdDependentBatchNormBase(_BatchNorm, base.MultiStepModule):
         torch.nn.init.constant_(self.weight, alpha * v_th)
 
     def forward(self, x_seq):
+        assert self.step_mode == 'm', "ThresholdDependentBatchNormBase can only be used in the multi-step mode!"
         return functional.seq_to_ann_forward(x_seq, super().forward)
 
 
@@ -1864,6 +1949,10 @@ class ThresholdDependentBatchNorm1d(_ThresholdDependentBatchNormBase):
         """
         super().__init__(alpha, v_th, *args, **kwargs)
 
+    def _check_input_dim(self, input):
+        assert input.dim() == 4 - 1 or input.dim() == 3 - 1  # [T * N, C, L]
+
+
 
 class ThresholdDependentBatchNorm2d(_ThresholdDependentBatchNormBase):
     def __init__(self, alpha: float, v_th: float, *args, **kwargs):
@@ -1897,6 +1986,8 @@ class ThresholdDependentBatchNorm2d(_ThresholdDependentBatchNormBase):
         """
         super().__init__(alpha, v_th, *args, **kwargs)
 
+    def _check_input_dim(self, input):
+        assert input.dim() == 5 - 1  # [T * N, C, H, W]
 
 class ThresholdDependentBatchNorm3d(_ThresholdDependentBatchNormBase):
     def __init__(self, alpha: float, v_th: float, *args, **kwargs):
@@ -1929,6 +2020,9 @@ class ThresholdDependentBatchNorm3d(_ThresholdDependentBatchNormBase):
         The Threshold-Dependent Batch Normalization (tdBN) proposed in `Going Deeper With Directly-Trained Larger Spiking Neural Networks <https://arxiv.org/abs/2011.05280>`_.
         """
         super().__init__(alpha, v_th, *args, **kwargs)
+
+    def _check_input_dim(self, input):
+        assert input.dim() == 6 - 1  # [T * N, C, H, W, D]
 
 
 class TemporalWiseAttention(nn.Module, base.MultiStepModule):
@@ -2313,3 +2407,397 @@ class Delay(base.MemoryModule):
 
     def multi_step_forward(self, x_seq: torch.Tensor):
         return functional.delay(x_seq, self.delay_steps)
+
+
+class TemporalEffectiveBatchNormNd(base.MemoryModule):
+
+    bn_instance = _BatchNorm
+
+    def __init__(
+            self,
+            T: int,
+            num_features,
+            eps=1e-5,
+            momentum=0.1,
+            affine=True,
+            track_running_stats=True,
+            step_mode='s'
+    ):
+        super().__init__()
+
+        self.bn = self.bn_instance(num_features, eps, momentum, affine, track_running_stats, step_mode)
+        self.scale = nn.Parameter(torch.ones([T]))
+        self.register_memory('t', 0)
+
+    def single_step_forward(self, x: torch.Tensor):
+        return self.bn(x) * self.scale[self.t]
+
+class TemporalEffectiveBatchNorm1d(TemporalEffectiveBatchNormNd):
+    bn_instance = BatchNorm1d
+    def __init__(
+            self,
+            T: int,
+            num_features,
+            eps=1e-5,
+            momentum=0.1,
+            affine=True,
+            track_running_stats=True,
+            step_mode='s'
+    ):
+        """
+        * :ref:`API in English <TemporalEffectiveBatchNorm1d-en>`
+
+        .. _TemporalEffectiveBatchNorm1d-cn:
+
+        :param T: 总时间步数
+        :type T: int
+
+        其他参数的API参见 :class:`BatchNorm1d`
+
+        `Temporal Effective Batch Normalization in Spiking Neural Networks <https://openreview.net/forum?id=fLIgyyQiJqz>`_ 一文提出的Temporal Effective Batch Normalization (TEBN)。
+
+        TEBN给每个时刻的输出增加一个缩放。若普通的BN在 ``t`` 时刻的输出是 ``y[t]``，则TEBN的输出为 ``k[t] * y[t]``，其中 ``k[t]`` 是可
+        学习的参数。
+
+        * :ref:`中文 API <TemporalEffectiveBatchNorm1d-cn>`
+
+        .. _TemporalEffectiveBatchNorm1d-en:
+
+        :param T: the number of time-steps
+        :type T: int
+
+        Refer to :class:`BatchNorm1d` for other parameters' API
+
+        Temporal Effective Batch Normalization (TEBN) proposed by `Temporal Effective Batch Normalization in Spiking Neural Networks <https://openreview.net/forum?id=fLIgyyQiJqz>`_.
+
+        TEBN adds a scale on outputs of each time-step from the native BN. Denote the output at time-step ``t`` of the native BN as ``y[t]``, then the output of TEBN is ``k[t] * y[t]``, where ``k[t]`` is the learnable scale.
+
+        """
+        super().__init__(T, num_features, eps, momentum, affine, track_running_stats, step_mode)
+
+    def multi_step_forward(self, x_seq: torch.Tensor):
+        # x.shape = [T, N, C, L]
+        return self.bn(x_seq) * self.scale.view(-1, 1, 1, 1)
+
+
+class TemporalEffectiveBatchNorm2d(TemporalEffectiveBatchNormNd):
+    bn_instance = BatchNorm2d
+    def __init__(
+            self,
+            T: int,
+            num_features,
+            eps=1e-5,
+            momentum=0.1,
+            affine=True,
+            track_running_stats=True,
+            step_mode='s'
+    ):
+        """
+        * :ref:`API in English <TemporalEffectiveBatchNorm2d-en>`
+
+        .. _TemporalEffectiveBatchNorm2d-cn:
+
+        :param T: 总时间步数
+        :type T: int
+
+        其他参数的API参见 :class:`BatchNorm2d`
+
+        `Temporal Effective Batch Normalization in Spiking Neural Networks <https://openreview.net/forum?id=fLIgyyQiJqz>`_ 一文提出的Temporal Effective Batch Normalization (TEBN)。
+
+        TEBN给每个时刻的输出增加一个缩放。若普通的BN在 ``t`` 时刻的输出是 ``y[t]``，则TEBN的输出为 ``k[t] * y[t]``，其中 ``k[t]`` 是可
+        学习的参数。
+
+        * :ref:`中文 API <TemporalEffectiveBatchNorm2d-cn>`
+
+        .. _TemporalEffectiveBatchNorm2d-en:
+
+        :param T: the number of time-steps
+        :type T: int
+
+        Refer to :class:`BatchNorm2d` for other parameters' API
+
+        Temporal Effective Batch Normalization (TEBN) proposed by `Temporal Effective Batch Normalization in Spiking Neural Networks <https://openreview.net/forum?id=fLIgyyQiJqz>`_.
+
+        TEBN adds a scale on outputs of each time-step from the native BN. Denote the output at time-step ``t`` of the native BN as ``y[t]``, then the output of TEBN is ``k[t] * y[t]``, where ``k[t]`` is the learnable scale.
+
+        """
+        super().__init__(T, num_features, eps, momentum, affine, track_running_stats, step_mode)
+
+    def multi_step_forward(self, x_seq: torch.Tensor):
+        # x.shape = [T, N, C, H, W]
+        return self.bn(x_seq) * self.scale.view(-1, 1, 1, 1, 1)
+
+
+
+class TemporalEffectiveBatchNorm3d(TemporalEffectiveBatchNormNd):
+    bn_instance = BatchNorm3d
+    def __init__(
+            self,
+            T: int,
+            num_features,
+            eps=1e-5,
+            momentum=0.1,
+            affine=True,
+            track_running_stats=True,
+            step_mode='s'
+    ):
+        """
+        * :ref:`API in English <TemporalEffectiveBatchNorm3d-en>`
+
+        .. _TemporalEffectiveBatchNorm3d-cn:
+
+        :param T: 总时间步数
+        :type T: int
+
+        其他参数的API参见 :class:`BatchNorm3d`
+
+        `Temporal Effective Batch Normalization in Spiking Neural Networks <https://openreview.net/forum?id=fLIgyyQiJqz>`_ 一文提出的Temporal Effective Batch Normalization (TEBN)。
+
+        TEBN给每个时刻的输出增加一个缩放。若普通的BN在 ``t`` 时刻的输出是 ``y[t]``，则TEBN的输出为 ``k[t] * y[t]``，其中 ``k[t]`` 是可
+        学习的参数。
+
+        * :ref:`中文 API <TemporalEffectiveBatchNorm3d-cn>`
+
+        .. _TemporalEffectiveBatchNorm3d-en:
+
+        :param T: the number of time-steps
+        :type T: int
+
+        Refer to :class:`BatchNorm3d` for other parameters' API
+
+        Temporal Effective Batch Normalization (TEBN) proposed by `Temporal Effective Batch Normalization in Spiking Neural Networks <https://openreview.net/forum?id=fLIgyyQiJqz>`_.
+
+        TEBN adds a scale on outputs of each time-step from the native BN. Denote the output at time-step ``t`` of the native BN as ``y[t]``, then the output of TEBN is ``k[t] * y[t]``, where ``k[t]`` is the learnable scale.
+
+        """
+        super().__init__(T, num_features, eps, momentum, affine, track_running_stats, step_mode)
+
+    def multi_step_forward(self, x_seq: torch.Tensor):
+        # x.shape = [T, N, C, H, W, D]
+        return self.bn(x_seq) * self.scale.view(-1, 1, 1, 1, 1, 1)
+
+
+# OTTT modules
+
+class ReplaceforGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, x_r):
+        return x_r
+
+    @staticmethod
+    def backward(ctx, grad):
+        return (grad, grad)
+
+
+class GradwithTrace(nn.Module):
+    def __init__(self, module):
+        """
+        * :ref:`API in English <GradwithTrace-en>`
+
+        .. _GradwithTrace-cn:
+
+        :param module: 需要包装的模块
+
+        用于随时间在线训练时，根据神经元的迹计算梯度
+        出处：'Online Training Through Time for Spiking Neural Networks <https://openreview.net/forum?id=Siv3nHYHheI>'
+
+        * :ref:`中文 API <GradwithTrace-cn>`
+
+        .. _GradwithTrace-en:
+
+        :param module: the module that requires wrapping
+
+        Used for online training through time, calculate gradients by the traces of neurons
+        Reference: 'Online Training Through Time for Spiking Neural Networks <https://openreview.net/forum?id=Siv3nHYHheI>'
+
+        """
+        super().__init__()
+        self.module = module
+
+    def forward(self, x: Tensor):
+        # x: [spike, trace], defined in OTTTLIFNode in neuron.py
+        spike, trace = x[0], x[1]
+        
+        with torch.no_grad():
+            out = self.module(spike).detach()
+
+        in_for_grad = ReplaceforGrad.apply(spike, trace)
+        out_for_grad = self.module(in_for_grad)
+
+        x = ReplaceforGrad.apply(out_for_grad, out)
+
+        return x
+
+
+class SpikeTraceOp(nn.Module):
+    def __init__(self, module):
+        """
+        * :ref:`API in English <SpikeTraceOp-en>`
+
+        .. _SpikeTraceOp-cn:
+
+        :param module: 需要包装的模块
+
+        对脉冲和迹进行相同的运算，如Dropout，AvgPool等
+
+        * :ref:`中文 API <GradwithTrace-cn>`
+
+        .. _SpikeTraceOp-en:
+
+        :param module: the module that requires wrapping
+
+        perform the same operations for spike and trace, such as Dropout, Avgpool, etc.
+
+        """
+        super().__init__()
+        self.module = module
+
+    def forward(self, x: Tensor):
+        # x: [spike, trace], defined in OTTTLIFNode in neuron.py
+        spike, trace = x[0], x[1]
+        
+        spike = self.module(spike)
+        with torch.no_grad():
+            trace = self.module(trace)
+
+        x = [spike, trace]
+
+        return x
+
+
+class OTTTSequential(nn.Sequential):
+    def __init__(self, *args):
+        super().__init__(*args)
+
+    def forward(self, input):
+        for module in self:
+            if not isinstance(input, list):
+                input = module(input)
+            else:
+                if len(list(module.parameters())) > 0: # e.g., Conv2d, Linear, etc.
+                    module = GradwithTrace(module)
+                else: # e.g., Dropout, AvgPool, etc.
+                    module = SpikeTraceOp(module)
+                input = module(input)
+        return input
+
+
+# weight standardization modules
+
+class WSConv2d(Conv2d):
+    def __init__(
+            self,
+            in_channels: int,
+            out_channels: int,
+            kernel_size: _size_2_t,
+            stride: _size_2_t = 1,
+            padding: Union[str, _size_2_t] = 0,
+            dilation: _size_2_t = 1,
+            groups: int = 1,
+            bias: bool = True,
+            padding_mode: str = 'zeros',
+            step_mode: str = 's',
+            gain: bool = True,
+            eps: float = 1e-4
+    ) -> None:
+        """
+        * :ref:`API in English <WSConv2d-en>`
+
+        .. _WSConv2d-cn:
+
+        :param gain: 是否对权重引入可学习的缩放系数
+        :type gain: bool
+
+        :param eps: 预防数值问题的小量
+        :type eps: float
+
+        其他的参数API参见 :class:`Conv2d`
+
+        * :ref:`中文 API <WSConv2d-cn>`
+
+        .. _WSConv2d-en:
+
+        :param gain: whether introduce learnable scale factors for weights
+        :type step_mode: bool
+
+        :param eps: a small number to prevent numerical problems
+        :type eps: float
+
+        Refer to :class:`Conv2d` for other parameters' API
+        """
+        super().__init__(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias, padding_mode, step_mode)
+        if gain:
+            self.gain = nn.Parameter(torch.ones(self.out_channels, 1, 1, 1))
+        else:
+            self.gain = None
+        self.eps = eps
+
+    def get_weight(self):
+        fan_in = np.prod(self.weight.shape[1:])
+        mean = torch.mean(self.weight, axis=[1, 2, 3], keepdims=True)
+        var = torch.var(self.weight, axis=[1, 2, 3], keepdims=True)
+        weight = (self.weight - mean) / ((var * fan_in + self.eps) ** 0.5)
+        if self.gain is not None:
+            weight = weight * self.gain
+        return weight
+
+    def _forward(self, x: Tensor):
+        return F.conv2d(x, self.get_weight(), self.bias, self.stride, self.padding, self.dilation, self.groups)
+
+    def forward(self, x: Tensor):
+        if self.step_mode == 's':
+            x = self._forward(x)
+
+        elif self.step_mode == 'm':
+            if x.dim() != 5:
+                raise ValueError(f'expected x with shape [T, N, C, H, W], but got x with shape {x.shape}!')
+            x = functional.seq_to_ann_forward(x, self._forward)
+
+        return x
+
+
+class WSLinear(Linear):
+    def __init__(self, in_features: int, out_features: int, bias: bool = True, step_mode='s', gain=True, eps=1e-4) -> None:
+        """
+        * :ref:`API in English <WSLinear-en>`
+
+        .. _WSLinear-cn:
+
+        :param gain: 是否对权重引入可学习的缩放系数
+        :type gain: bool
+
+        :param eps: 预防数值问题的小量
+        :type eps: float
+
+        其他的参数API参见 :class:`Linear`
+
+        * :ref:`中文 API <WSLinear-cn>`
+
+        .. _WSLinear-en:
+
+        :param gain: whether introduce learnable scale factors for weights
+        :type step_mode: bool
+
+        :param eps: a small number to prevent numerical problems
+        :type eps: float
+
+        Refer to :class:`Linear` for other parameters' API
+        """
+        super().__init__(in_features, out_features, bias, step_mode)
+        if gain:
+            self.gain = nn.Parameter(torch.ones(self.out_channels, 1))
+        else:
+            self.gain = None
+        self.eps = eps
+
+    def get_weight(self):
+        fan_in = np.prod(self.weight.shape[1:])
+        mean = torch.mean(self.weight, axis=[1], keepdims=True)
+        var = torch.var(self.weight, axis=[1], keepdims=True)
+        weight = (self.weight - mean) / ((var * fan_in + self.eps) ** 0.5)
+        if self.gain is not None:
+            weight = weight * self.gain
+        return weight
+
+    def forward(self, x: Tensor):
+        return F.linear(x, self.get_weight(), self.bias)
